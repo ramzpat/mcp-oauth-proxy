@@ -1,0 +1,24 @@
+# The original local docker-compose this deployment was ported from.
+# Kept here for reference / local testing only — not used in the Cloud Run
+# deploy, since the proxy replaces the need to expose grafana-mcp's port
+# directly.
+
+services:
+  grafana-mcp:
+    image: grafana/mcp-grafana:latest
+    container_name: grafana-mcp
+    command:
+      - -t
+      - streamable-http
+      - --allowed-hosts
+      - "*"
+      - --allowed-origins
+      - "*"
+      - --debug
+    ports:
+      - 3002:8000
+    environment:
+      - GRAFANA_URL=https://monitoring.pattaravut.info
+      - GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_SERVICE_ACCOUNT_TOKEN}
+    restart: unless-stopped
+networks: {}
