@@ -106,6 +106,13 @@ itself, via [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml)
 also has the full setup walkthrough. `main` never triggers a deploy; each
 MCP server gets its own `deploy/<name>` branch like this one.
 
+The workflow is two jobs: `build` builds+pushes the oauth-proxy image to
+Artifact Registry (tagged with the commit SHA, resolved to its digest), then
+`deploy` (which needs `build`) rolls that exact image out to Cloud Run. Both
+jobs run under the same `grafana-mcp` GitHub Environment — `build` only
+needs its non-secret vars (to authenticate and tag/push the image), `deploy`
+also needs its secrets (to configure the containers' env vars).
+
 Before the first push, do the one-time GCP setup (Artifact Registry repo +
 Workload Identity Federation — see `deploy-template/README.md` step 0),
 then create a GitHub Environment named **`grafana-mcp`** with:

@@ -6,6 +6,15 @@
 #  - Deploys only from this one branch, not main -- each MCP server gets its
 #    own branch + workflow + GitHub Environment, so unrelated MCP
 #    deployments never trigger each other's CI.
+#  - Two jobs: `build` builds+pushes the oauth-proxy image (needs only the
+#    GitHub Environment's non-secret vars, to tag/push it to GAR), then
+#    `deploy` (needs: build) takes that image and rolls it out to Cloud Run
+#    (needs the Environment's secrets too, for the container's env vars).
+#    Keeping them separate means a build failure never touches the live
+#    Cloud Run revision, and the built image is identified by digest so the
+#    deploy step is guaranteed to run exactly what was just built and
+#    scanned/pushed -- not a same-tag image that could've been overwritten
+#    in between jobs.
 #  - All config comes from a GitHub Environment named after the branch/
 #    service: non-secret values as Environment variables, credentials as
 #    Environment secrets. No Google Secret Manager -- keeps every MCP's
@@ -32,13 +41,14 @@ permissions:
   id-token: write # Workload Identity Federation
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     environment: grafana-mcp
+    outputs:
+      image: ${{ steps.build.outputs.image }}
     env:
       PROJECT_ID: ${{ vars.PROJECT_ID }}
       REGION: ${{ vars.REGION }}
-      SERVICE: ${{ vars.SERVICE }}
       AR_REPO: ${{ vars.AR_REPO }}
     steps:
       - uses: actions/checkout@v4
@@ -56,14 +66,36 @@ jobs:
       - id: build
         name: build+push oauth-proxy image
         run: |
+          set -euo pipefail
           IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/oauth-proxy:${{ github.sha }}"
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+          # Pin the deploy job to the exact digest just pushed, not the tag
+          # -- the tag could in principle be overwritten between jobs.
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")
+          echo "image=$DIGEST" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: grafana-mcp
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      SERVICE: ${{ vars.SERVICE }}
+    steps:
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
 
       - name: deploy to Cloud Run
         env:
-          PROXY_IMAGE: ${{ steps.build.outputs.image }}
+          PROXY_IMAGE: ${{ needs.build.outputs.image }}
           ALLOWED_DOMAINS: ${{ vars.ALLOWED_DOMAINS }}
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
