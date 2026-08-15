@@ -92,9 +92,21 @@ mkdir -p .github/workflows
 cp deploy-template/workflow.yml.template .github/workflows/deploy.yml
 ```
 
-Fill in every `TODO` in that file: the branch name in `on.push.branches`,
-the `environment:` name, and the backend container's image/command/port/env
-vars for this specific MCP server.
+Fill in every `TODO` in that file:
+
+- The `env:` block at the top (`PROJECT_ID`, `REGION`, `AR_REPO`,
+  `SERVICE`) and the `auth` step's `workload_identity_provider` /
+  `service_account` — these are the GCP project-level values from step 0,
+  the **same for every MCP server in this project**. If another
+  `deploy/*` branch already deploys here, copy its values instead of
+  looking them up again.
+- The branch name in `on.push.branches` and the `environment:` name.
+- The backend container's image/command/port/env vars for this specific
+  MCP server.
+
+Only genuinely per-service things belong in a GitHub Environment (step 3)
+— everything else is a plain value in the workflow file, so each new MCP
+branch doesn't have to redeclare project-wide infra.
 
 ## 3. Create the GitHub Environment
 
@@ -105,12 +117,6 @@ whatever you put in the workflow's `environment:` field).
 
 | Name | Meaning |
 |---|---|
-| `PROJECT_ID` | GCP project ID |
-| `REGION` | Cloud Run / Artifact Registry region, e.g. `asia-southeast1` |
-| `SERVICE` | Cloud Run service name |
-| `AR_REPO` | Artifact Registry repo, e.g. `mcp` |
-| `WORKLOAD_IDENTITY_PROVIDER` | the WIF provider resource name from step 0 |
-| `DEPLOYER_SERVICE_ACCOUNT` | `gh-deployer@<project>.iam.gserviceaccount.com` |
 | `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` | proxy allowlist |
 | any non-secret env var the backend MCP server needs | e.g. `GRAFANA_URL` |
 
