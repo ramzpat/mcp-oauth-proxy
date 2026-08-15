@@ -107,19 +107,22 @@ also has the full setup walkthrough. `main` never triggers a deploy; each
 MCP server gets its own `deploy/<name>` branch like this one.
 
 Before the first push, do the one-time GCP setup (Artifact Registry repo +
-Workload Identity Federation — see `deploy-template/README.md` step 0),
-then create a GitHub Environment named **`grafana-mcp`** with:
+Workload Identity Federation — see `deploy-template/README.md` step 0) and
+fill in the `TODO`s at the top of `.github/workflows/deploy.yml`
+(`PROJECT_ID`, `REGION`, `WORKLOAD_IDENTITY_PROVIDER`,
+`DEPLOYER_SERVICE_ACCOUNT`) — these are GCP project-level constants, the
+same for every MCP server in this project, so they live as plain values in
+the workflow file rather than per-Environment config. If this is the same
+GCP project as `wiki-mcp-go`, they're already known from that repo's
+workflow.
+
+Then create a GitHub Environment named **`grafana-mcp`** for what actually
+*is* specific to this service:
 
 **Variables:**
 
 | Name | Meaning |
 |---|---|
-| `PROJECT_ID` | GCP project ID |
-| `REGION` | Cloud Run / Artifact Registry region, e.g. `asia-southeast1` |
-| `SERVICE` | Cloud Run service name, e.g. `grafana-mcp` |
-| `AR_REPO` | Artifact Registry repo, e.g. `mcp` |
-| `WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name from the one-time setup |
-| `DEPLOYER_SERVICE_ACCOUNT` | `gh-deployer@<project>.iam.gserviceaccount.com` |
 | `ALLOWED_DOMAINS` | Comma-separated allowed Workspace domains, e.g. `pattaravut.info` |
 | `GRAFANA_URL` | Your Grafana instance URL, e.g. `https://monitoring.pattaravut.info` |
 
