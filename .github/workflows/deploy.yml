@@ -31,34 +31,23 @@ permissions:
   contents: read
   id-token: write # Workload Identity Federation
 
-# GCP project-level infra, shared by every MCP server deployed into this
-# project (set up once -- deploy-template/README.md step 0). Not
-# per-service, so it lives here as a constant rather than in the
-# grafana-mcp GitHub Environment; edit only if this service moves to a
-# different GCP project/region.
-#
-# TODO: fill in with real values from the project's one-time GCP setup
-# (deploy-template/README.md step 0) -- if this is the same GCP project as
-# wiki-mcp-go, PROJECT_ID/WORKLOAD_IDENTITY_PROVIDER/DEPLOYER_SERVICE_ACCOUNT
-# are already known: see that repo's .github/workflows/deploy.yml.
-env:
-  PROJECT_ID: <PROJECT_ID>
-  REGION: <REGION>
-  AR_REPO: mcp
-  SERVICE: grafana-mcp
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: grafana-mcp
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      SERVICE: ${{ vars.SERVICE }}
+      AR_REPO: ${{ vars.AR_REPO }}
     steps:
       - uses: actions/checkout@v4
 
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-          service_account: gh-deployer@<PROJECT_ID>.iam.gserviceaccount.com
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
