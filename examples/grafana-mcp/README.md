@@ -100,12 +100,46 @@ Trade-offs to accept:
 
 ## CI/CD: GitHub Actions
 
-This repo deploys each MCP server from its **own branch**, not `main`.
-`main` only carries the generic template + setup instructions —
-see [`deploy-template/README.md`](../../deploy-template/README.md).
-The actual grafana-mcp workflow (built from that template) lives on the
-`deploy/grafana-mcp` branch, with its own `.github/workflows/deploy.yml`
-and its config in the `grafana-mcp` GitHub Environment.
+This branch (`deploy/grafana-mcp`) deploys automatically on every push to
+itself, via [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml)
+— built from [`deploy-template/`](../../deploy-template) on `main`, which
+also has the full setup walkthrough. `main` never triggers a deploy; each
+MCP server gets its own `deploy/<name>` branch like this one.
+
+Before the first push, do the one-time GCP setup (Artifact Registry repo +
+Workload Identity Federation — see `deploy-template/README.md` step 0),
+then create a GitHub Environment named **`grafana-mcp`** with:
+
+**Variables:**
+
+| Name | Meaning |
+|---|---|
+| `PROJECT_ID` | GCP project ID |
+| `REGION` | Cloud Run / Artifact Registry region, e.g. `asia-southeast1` |
+| `SERVICE` | Cloud Run service name, e.g. `grafana-mcp` |
+| `AR_REPO` | Artifact Registry repo, e.g. `mcp` |
+| `WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name from the one-time setup |
+| `DEPLOYER_SERVICE_ACCOUNT` | `gh-deployer@<project>.iam.gserviceaccount.com` |
+| `ALLOWED_DOMAINS` | Comma-separated allowed Workspace domains, e.g. `pattaravut.info` |
+| `GRAFANA_URL` | Your Grafana instance URL, e.g. `https://monitoring.pattaravut.info` |
+
+**Secrets:**
+
+| Name | Meaning |
+|---|---|
+| `SIGNING_KEY` | `openssl rand -base64 48` — proxy's JWT signing key |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | upstream Google OAuth client |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Grafana service account token for `mcp-grafana` |
+
+These live entirely in this GitHub Environment — no Google Secret Manager
+involved (see `deploy-template/README.md` for the trade-off this implies).
+
+**The public `*.run.app` URL isn't known until the first deploy finishes** —
+the workflow bootstraps in two phases on a brand-new service (placeholder
+URL, then a redeploy with the real one) and prints the OAuth redirect URI
+to register at the end. Every push after that is a single, direct
+redeploy since the URL is already known. See `deploy-template/README.md`
+step 5 for details.
 
 ## Original docker-compose
 
