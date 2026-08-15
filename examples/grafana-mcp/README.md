@@ -98,6 +98,60 @@ Trade-offs to accept:
   refreshes immediately, but an already-issued access token remains valid
   until it expires.
 
+## CI/CD: GitHub Actions
+
+[`.github/workflows/deploy-grafana-mcp.yml`](../../.github/workflows/deploy-grafana-mcp.yml)
+builds and deploys this service automatically on push to `main` (paths:
+`app.py`, `requirements.txt`, `Dockerfile`, `examples/grafana-mcp/**`), or
+on demand via `workflow_dispatch`. It runs the same two-phase `gcloud run
+deploy` as `deploy.sh` above (skipping straight to a single deploy once the
+service already exists, since the `run.app` URL is then already known).
+
+It assumes steps 2 (Secrets) and the one-time Google OAuth client setup
+above have already been done manually, and reads everything else from a
+GitHub **Environment** named `grafana-mcp`:
+
+| Environment variable | Required | Meaning |
+|---|---|---|
+| `PROJECT_ID` | yes | GCP project ID |
+| `REGION` | yes | Cloud Run / Artifact Registry region, e.g. `asia-southeast1` |
+| `WORKLOAD_IDENTITY_PROVIDER` | yes | Full WIF provider resource name for [`google-github-actions/auth`](https://github.com/google-github-actions/auth) |
+| `DEPLOYER_SERVICE_ACCOUNT` | yes | Service account email the workflow impersonates via WIF; needs `roles/run.admin`, `roles/iam.serviceAccountUser`, and `roles/artifactregistry.writer` on the project, plus `roles/secretmanager.secretAccessor` on the four secrets from step 2 |
+| `SERVICE` | no | Cloud Run service name, default `grafana-mcp` |
+| `AR_REPO` | no | Artifact Registry repo name, default `mcp` |
+| `GRAFANA_URL` | no | Grafana instance URL, default `https://monitoring.pattaravut.info` |
+| `ALLOWED_DOMAINS` | no | Comma-separated allowed Workspace domains, default `pattaravut.info` |
+
+No GitHub **secrets** are needed — the sensitive values
+(`GRAFANA_SERVICE_ACCOUNT_TOKEN`, `SIGNING_KEY`, `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`) live in Secret Manager (via `secrets-setup.sh`) and
+are wired in by name with `--set-secrets`; the workflow only needs GCP
+credentials to deploy.
+
+Set up Workload Identity Federation once, e.g.:
+
+```bash
+gcloud iam workload-identity-pools create github-pool \
+  --project="$PROJECT_ID" --location=global --display-name="GitHub Actions"
+
+gcloud iam workload-identity-pools providers create-oidc github-provider \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool=github-pool \
+  --display-name="GitHub" --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="assertion.repository=='<owner>/mcp-oauth-proxy'"
+
+gcloud iam service-accounts create gh-deployer --project="$PROJECT_ID"
+
+gcloud iam service-accounts add-iam-policy-binding \
+  "gh-deployer@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --project="$PROJECT_ID" --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-pool/attribute.repository/<owner>/mcp-oauth-proxy"
+```
+
+Then grant `gh-deployer@$PROJECT_ID.iam.gserviceaccount.com` the roles
+listed above, and set `WORKLOAD_IDENTITY_PROVIDER` to
+`projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-pool/providers/github-provider`.
+
 ## Original docker-compose
 
 See [`docker-compose.original.yml`](docker-compose.original.yml) — the
