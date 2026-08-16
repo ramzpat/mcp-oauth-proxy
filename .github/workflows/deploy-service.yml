@@ -162,7 +162,6 @@ on:
 permissions:
   contents: read
   id-token: write # Workload Identity Federation
-  packages: read  # to resolve the oauth-proxy image's digest from ghcr.io
 
 jobs:
   deploy:
@@ -206,12 +205,6 @@ jobs:
           echo "::error::Neither allowed_domains nor allowed_emails is set -- app.py refuses to boot without at least one, so this would fail at container startup instead. Set one in the caller workflow / GitHub Environment."
           exit 1
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: resolve proxy image to a digest
         id: resolve_proxy_image
         run: |
@@ -225,6 +218,14 @@ jobs:
           # digest here (talking to ghcr.io directly, not through GCP's
           # cache) and deploying pinned to that digest sidesteps it
           # entirely -- an unseen digest is always fetched fresh.
+          #
+          # No docker/login-action here: this package is public (Cloud
+          # Run itself has never had any ghcr.io credentials configured
+          # anywhere in this deploy, and pulls it fine), and adding a
+          # login would need a `packages: read` grant that this repo's
+          # default GITHUB_TOKEN permissions cap at `none` -- a repo/org
+          # setting no workflow-level `permissions:` block can override.
+          # An anonymous inspect works for a public image regardless.
           DIGEST=$(docker buildx imagetools inspect "$PROXY_IMAGE" | awk '/^Digest:/{print $2; exit}')
           echo "resolved digest: $DIGEST"
           echo "image=${PROXY_IMAGE%%:*}@${DIGEST}" >> "$GITHUB_OUTPUT"
