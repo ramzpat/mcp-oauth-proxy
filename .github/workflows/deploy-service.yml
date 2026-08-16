@@ -132,6 +132,11 @@ jobs:
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
     steps:
+      - name: diagnostics -- confirm which commit of this workflow actually ran
+        run: |
+          echo "deploy-service.yml resolved from: ${{ github.workflow_ref }}"
+          echo "backend_command input as received: ${{ inputs.backend_command }}"
+
       - id: auth
         uses: google-github-actions/auth@v2
         with:
@@ -142,7 +147,7 @@ jobs:
 
       - name: deploy to Cloud Run
         run: |
-          set -euo pipefail
+          set -euo pipefail -x # -x: echo every gcloud invocation verbatim into the log
 
           # `^##^` switches gcloud's list delimiter from "," to "##" so
           # secret/command values containing commas can't break --set-env-vars.
