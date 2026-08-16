@@ -64,7 +64,16 @@ on:
         required: true
         type: string
       backend_command:
-        description: Comma-separated argv for the backend container
+        description: >-
+          Comma-separated argv for the backend container. gcloud's
+          --command flag (which this becomes) rejects a literal value
+          repeated within the list -- e.g. the same "127.0.0.1" as both a
+          flag's value and another flag's value fails with "cannot be
+          specified multiple times". Use a textually distinct but
+          equivalent value if that happens (e.g. a full origin
+          "http://127.0.0.1:<port>" instead of a bare host, for a flag
+          that's semantically checking an Origin header rather than a
+          Host header).
         required: true
         type: string
       backend_port:
