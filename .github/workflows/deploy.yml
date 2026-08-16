@@ -33,7 +33,12 @@ jobs:
       workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
       deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
       allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
+      allowed_emails: ${{ vars.ALLOWED_EMAILS }}
       backend_env_vars: ${{ steps.compose.outputs.value }}
+    # NOTE: the outputs: block above IS what the `deploy` job's `with:`
+    # reads via needs.prepare.outputs.* -- these `vars.*` expressions are
+    # evaluated by GitHub directly against this job's `environment:`, no
+    # step/shell involved.
     steps:
       - id: compose
         env:
@@ -41,6 +46,18 @@ jobs:
           GRAFANA_SERVICE_ACCOUNT_TOKEN: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
         run: |
           echo "value=GRAFANA_URL=${GRAFANA_URL}##GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_SERVICE_ACCOUNT_TOKEN}" >> "$GITHUB_OUTPUT"
+
+      # Diagnostics: GH auto-masks any secret value that appears in logs,
+      # so it's safe to print these directly even if non-empty.
+      - name: diagnostics -- confirm what this job actually resolved
+        run: |
+          echo "ALLOWED_DOMAINS (vars)  = '${{ vars.ALLOWED_DOMAINS }}'"
+          echo "ALLOWED_EMAILS (vars)   = '${{ vars.ALLOWED_EMAILS }}'"
+          echo "GRAFANA_URL (vars)      = '${{ vars.GRAFANA_URL }}'"
+          echo "compose output length  = ${#COMPOSE_VALUE}"
+          echo "compose output value   = '${COMPOSE_VALUE}'"
+        env:
+          COMPOSE_VALUE: ${{ steps.compose.outputs.value }}
 
   deploy:
     needs: prepare
@@ -56,6 +73,7 @@ jobs:
       workload_identity_provider: ${{ needs.prepare.outputs.workload_identity_provider }}
       deployer_service_account: ${{ needs.prepare.outputs.deployer_service_account }}
       allowed_domains: ${{ needs.prepare.outputs.allowed_domains }}
+      allowed_emails: ${{ needs.prepare.outputs.allowed_emails }}
       # --allowed-origins uses the full origin (scheme://host:port), not
       # the bare host -- that's the semantically correct value for an
       # Origin-header check anyway, and it also has to differ textually

@@ -148,7 +148,8 @@ Environment named **`grafana-mcp`** with:
 | `SERVICE` | Cloud Run service name, e.g. `grafana-mcp` |
 | `WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name from the one-time setup |
 | `DEPLOYER_SERVICE_ACCOUNT` | `gh-deployer@<project>.iam.gserviceaccount.com` |
-| `ALLOWED_DOMAINS` | Comma-separated allowed Workspace domains, e.g. `pattaravut.info` |
+| `ALLOWED_DOMAINS` | Comma-separated allowed Workspace domains, e.g. `pattaravut.info`. At least one of this/`ALLOWED_EMAILS` is required. |
+| `ALLOWED_EMAILS` | Comma-separated exact emails allowed to log in, e.g. `you@example.com`. At least one of this/`ALLOWED_DOMAINS` is required. |
 | `GRAFANA_URL` | Your Grafana instance URL, e.g. `https://monitoring.pattaravut.info` |
 
 **Secrets:**
