@@ -1,0 +1,177 @@
+# Reusable workflow: deploys the oauth-proxy + a backend MCP server as one
+# Cloud Run multi-container service. Lives on `main` so every deploy
+# branch can call it (`uses: <owner>/<repo>/.github/workflows/deploy-service.yml@main`)
+# instead of each copy-pasting its own ~130-line gcloud script.
+#
+# Design:
+#  - The proxy image comes from ghcr.io/<repo> (published by build.yml on
+#    every push to main) -- this workflow never builds anything itself,
+#    just deploys what's already published.
+#  - GCP auth is Workload Identity Federation, not a long-lived key.
+#  - `environment: ${{ inputs.environment }}` scopes the job to the
+#    caller's GitHub Environment, so its required-reviewer / deployment-
+#    branch protection rules (if any) apply here too.
+#  - Backend-specific secrets (e.g. a Grafana service-account token) can't
+#    be declared here by name -- every MCP server needs different ones.
+#    Callers compose a single `backend_env_vars` string themselves (in
+#    their own job, with their own secrets) and pass the *result* as a
+#    plain input -- GitHub Actions masks the underlying secret values in
+#    logs wherever they appear, so this doesn't leak them, it just avoids
+#    this workflow needing to know their names in advance.
+#  - PUBLIC_URL/RESOURCE aren't known until Cloud Run assigns the service
+#    its *.run.app URL. The very first deploy of a new service bootstraps
+#    in two phases (deploy with a placeholder URL to provision the
+#    service, then redeploy with the real one); every deploy after that
+#    reuses the already-assigned URL in a single shot.
+
+name: deploy Cloud Run service (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment holding this service's vars/secrets
+        required: true
+        type: string
+      service:
+        description: Cloud Run service name
+        required: true
+        type: string
+      project_id:
+        required: true
+        type: string
+      region:
+        required: true
+        type: string
+      workload_identity_provider:
+        description: WIF provider resource name
+        required: true
+        type: string
+      deployer_service_account:
+        required: true
+        type: string
+      allowed_domains:
+        description: Comma-separated Workspace domains allowed to log in
+        required: true
+        type: string
+      proxy_image_tag:
+        description: Tag of ghcr.io/<repo> to deploy
+        required: false
+        type: string
+        default: latest
+      backend_image:
+        description: Unmodified MCP server image, e.g. grafana/mcp-grafana:latest
+        required: true
+        type: string
+      backend_command:
+        description: Comma-separated argv for the backend container
+        required: true
+        type: string
+      backend_port:
+        description: Port the backend container listens on
+        required: true
+        type: string
+      backend_env_vars:
+        description: >-
+          Extra backend env vars, "##"-delimited KEY=VALUE pairs (e.g.
+          composed by the caller from its own vars/secrets). Optional.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      SIGNING_KEY:
+        required: true
+      GOOGLE_CLIENT_ID:
+        required: true
+      GOOGLE_CLIENT_SECRET:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      PROJECT_ID: ${{ inputs.project_id }}
+      REGION: ${{ inputs.region }}
+      SERVICE: ${{ inputs.service }}
+      ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
+      PROXY_IMAGE: ghcr.io/${{ github.repository }}:${{ inputs.proxy_image_tag }}
+      BACKEND_IMAGE: ${{ inputs.backend_image }}
+      BACKEND_COMMAND: ${{ inputs.backend_command }}
+      BACKEND_PORT: ${{ inputs.backend_port }}
+      BACKEND_ENV_VARS: ${{ inputs.backend_env_vars }}
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+    steps:
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.workload_identity_provider }}
+          service_account: ${{ inputs.deployer_service_account }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: deploy to Cloud Run
+        run: |
+          set -euo pipefail
+
+          # `^##^` switches gcloud's list delimiter from "," to "##" so
+          # secret/command values containing commas can't break --set-env-vars.
+          deploy() {
+            local public_url="$1"
+            local backend_extra=""
+            [ -n "$BACKEND_ENV_VARS" ] && backend_extra="##${BACKEND_ENV_VARS}"
+
+            gcloud run deploy "$SERVICE" \
+              --project="$PROJECT_ID" \
+              --region="$REGION" \
+              --allow-unauthenticated \
+              --min-instances=0 --max-instances=3 \
+              --no-cpu-throttling \
+              --container=backend \
+                --image="$BACKEND_IMAGE" \
+                --command="$BACKEND_COMMAND" \
+                --set-env-vars="^##^PORT=${BACKEND_PORT}##HOST=127.0.0.1${backend_extra}" \
+              --container=oauth-proxy \
+                --image="$PROXY_IMAGE" \
+                --port=8080 \
+                --startup-cpu-boost \
+                --depends-on=backend \
+                --set-env-vars="^##^PUBLIC_URL=${public_url}##UPSTREAM_URL=http://127.0.0.1:${BACKEND_PORT}##RESOURCE=${public_url}/mcp##ALLOWED_DOMAINS=${ALLOWED_DOMAINS}##SIGNING_KEY=${SIGNING_KEY}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
+          }
+
+          # Public URL is unknown until Cloud Run provisions the service
+          # for the first time.
+          EXISTING_URL=$(gcloud run services describe "$SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" \
+            --format='value(status.url)' 2>/dev/null || true)
+
+          if [ -n "$EXISTING_URL" ]; then
+            echo "== Redeploying existing service (PUBLIC_URL=${EXISTING_URL}) =="
+            deploy "$EXISTING_URL"
+            SERVICE_URL="$EXISTING_URL"
+          else
+            echo "== First deploy: PUBLIC_URL isn't known yet -- bootstrapping =="
+            echo "== Phase 1/2: provisioning with a placeholder URL =="
+            deploy "https://placeholder.invalid"
+
+            SERVICE_URL=$(gcloud run services describe "$SERVICE" \
+              --project="$PROJECT_ID" --region="$REGION" \
+              --format='value(status.url)')
+
+            echo "== Phase 2/2: redeploying with the real PUBLIC_URL=${SERVICE_URL} =="
+            deploy "$SERVICE_URL"
+
+            echo
+            echo "New service -- register this redirect URI in your IdP console"
+            echo "before trying to log in (it wasn't knowable before this deploy):"
+            echo "  ${SERVICE_URL}/oauth2/callback"
+          fi
+
+          echo
+          echo "MCP endpoint: ${SERVICE_URL}/mcp"
