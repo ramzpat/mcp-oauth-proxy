@@ -32,6 +32,9 @@ jobs:
 
   deploy:
     needs: prepare
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation -- deploy-service.yml needs this granted here to use it itself
     uses: ramzpat/mcp-oauth-proxy/.github/workflows/deploy-service.yml@main
     with:
       environment: grafana-mcp
