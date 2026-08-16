@@ -30,6 +30,7 @@ Run:
 
 import base64
 import hashlib
+import logging
 import os
 import time
 import urllib.parse
@@ -41,6 +42,9 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
+
+logger = logging.getLogger("oauth-proxy")
+logging.basicConfig(level=logging.INFO)
 
 # --------------------------------------------------------------------------
 # Config (all via env vars / Secret Manager — nothing hardcoded)
@@ -374,17 +378,25 @@ HOP_BY_HOP = {
 async def mcp_proxy(request: Request):
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
+        logger.warning(
+            "mcp_proxy 401: no Bearer auth header (header present: %s, value prefix: %r)",
+            "authorization" in {k.lower() for k in request.headers.keys()},
+            auth_header[:16],
+        )
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header()})
 
     raw_token = auth_header[len("Bearer "):]
     try:
         claims = verify(raw_token, expected_typ="access")
     except pyjwt.ExpiredSignatureError:
+        logger.warning("mcp_proxy 401: token expired (token length %d)", len(raw_token))
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header() + ', error="invalid_token"'})
-    except pyjwt.InvalidTokenError:
+    except pyjwt.InvalidTokenError as e:
+        logger.warning("mcp_proxy 401: invalid token (%s: %s, token length %d)", type(e).__name__, e, len(raw_token))
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header() + ', error="invalid_token"'})
 
     if claims.get("aud") != RESOURCE:
+        logger.warning("mcp_proxy 401: aud mismatch (token aud=%r, expected RESOURCE=%r)", claims.get("aud"), RESOURCE)
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header() + ', error="invalid_token"'})
 
     # Strip the inbound Authorization header and ANY client-forged
