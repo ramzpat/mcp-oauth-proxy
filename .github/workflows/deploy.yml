@@ -1,9 +1,15 @@
 # Deploys grafana-mcp to Cloud Run on every push to this branch. Thin
 # caller for the reusable workflow on main -- see README.md's "Deploying a
-# new MCP server to Cloud Run" section for the shape this follows and why
-# the `prepare` job exists (a reusable workflow's `with:` can't reference
-# `secrets` directly, so GRAFANA_SERVICE_ACCOUNT_TOKEN has to be composed
-# into a plain string here first, then handed through as a job output).
+# new MCP server to Cloud Run" section for the shape this follows.
+#
+# `prepare` runs with `environment: grafana-mcp` so it can see this MCP's
+# Environment-scoped vars/secrets, and republishes everything the `deploy`
+# job's `with:` needs as plain job outputs. Two reasons `deploy` can't just
+# read `vars.*`/`secrets.*` itself: a job that calls a reusable workflow
+# (`uses:`) doesn't support an `environment:` key at all (GitHub rejects
+# the whole job as malformed if you add one), and even if it did, `with:`
+# can't reference `secrets` directly regardless. Composing everything in
+# `prepare` and passing it via `needs.prepare.outputs.*` sidesteps both.
 #
 # No build step here anymore: the oauth-proxy image is generic and built
 # once on main (.github/workflows/build.yml there), published to
@@ -21,6 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: grafana-mcp
     outputs:
+      service: ${{ vars.SERVICE }}
+      project_id: ${{ vars.PROJECT_ID }}
+      region: ${{ vars.REGION }}
+      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+      deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+      allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
       backend_env_vars: ${{ steps.compose.outputs.value }}
     steps:
       - id: compose
@@ -32,24 +44,18 @@ jobs:
 
   deploy:
     needs: prepare
-    # `with:` below is evaluated in *this* job's context, before the call
-    # happens -- without this, `vars.*` only sees repo/org-level
-    # variables, not the Environment-scoped ones (PROJECT_ID, REGION,
-    # etc.) actually configured under the "grafana-mcp" GitHub
-    # Environment, and every `with:` input silently resolves empty.
-    environment: grafana-mcp
     permissions:
       contents: read
       id-token: write # Workload Identity Federation -- deploy-service.yml needs this granted here to use it itself
     uses: ramzpat/mcp-oauth-proxy/.github/workflows/deploy-service.yml@main
     with:
       environment: grafana-mcp
-      service: ${{ vars.SERVICE }}
-      project_id: ${{ vars.PROJECT_ID }}
-      region: ${{ vars.REGION }}
-      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
-      deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
-      allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
+      service: ${{ needs.prepare.outputs.service }}
+      project_id: ${{ needs.prepare.outputs.project_id }}
+      region: ${{ needs.prepare.outputs.region }}
+      workload_identity_provider: ${{ needs.prepare.outputs.workload_identity_provider }}
+      deployer_service_account: ${{ needs.prepare.outputs.deployer_service_account }}
+      allowed_domains: ${{ needs.prepare.outputs.allowed_domains }}
       backend_image: grafana/mcp-grafana:latest
       backend_command: -t,streamable-http,--allowed-hosts,127.0.0.1,--allowed-origins,127.0.0.1
       backend_port: "8000"
