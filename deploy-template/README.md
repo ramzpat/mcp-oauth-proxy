@@ -1,12 +1,27 @@
 # Deploying a new MCP server: template & instructions
 
-This repo deploys **one MCP server per branch**, never from `main`. `main`
-carries only the proxy itself (`app.py`, `Dockerfile`) and this template —
-each MCP server gets its own `deploy/<name>` branch with its own GitHub
-Actions workflow, triggered only by pushes to that branch, configured from
-its own GitHub Environment. That keeps unrelated MCP deployments from
-triggering each other's CI and lets each one carry completely different
-image/command/credentials without conditionals in a shared workflow.
+This repo deploys **one MCP server per branch**, never from `main`. Each
+MCP server gets its own `deploy/<name>` branch, with its own GitHub
+Environment holding that MCP's vars/secrets, driven by a pair of
+workflows:
+
+- **build** (on the `deploy/<name>` branch): triggered only by pushes to
+  that branch, builds+pushes the oauth-proxy image and uploads its digest
+  as an artifact.
+- **deploy** (on `main`): a `workflow_run` listener that fires when the
+  matching build workflow completes, downloads that digest, and does the
+  actual `gcloud run deploy`.
+
+They're two separate files/workflows, not two jobs in one, so a build
+failure can never touch the live Cloud Run revision. The deploy listener
+has to live on `main` specifically because GitHub only fires
+`workflow_run` for a listener workflow present on the repo's *default*
+branch, regardless of which branch triggered it — so `main` ends up
+holding one thin, generic listener file per MCP server (no vars/secrets
+of its own; those still live entirely in that MCP's GitHub Environment).
+Everything else stays self-contained to the `deploy/<name>` branch, so
+unrelated MCP deployments still can't trigger each other's build CI or
+carry each other's config.
 
 Config is **GitHub Environment vars + secrets only** — no Google Secret
 Manager. Every MCP server has different credentials, and keeping all of
@@ -85,16 +100,25 @@ git checkout main
 git checkout -b deploy/<mcp-name>
 ```
 
-## 2. Copy the template workflow in
+## 2. Copy the template workflows in
+
+Two files, two different branches:
 
 ```bash
+# On deploy/<mcp-name>:
 mkdir -p .github/workflows
-cp deploy-template/workflow.yml.template .github/workflows/deploy.yml
+cp deploy-template/workflow-build.yml.template .github/workflows/build.yml
+
+# On main (separately — see step 4):
+cp deploy-template/workflow-deploy.yml.template .github/workflows/deploy-<mcp-name>.yml
 ```
 
-Fill in every `TODO` in that file: the branch name in `on.push.branches`,
-the `environment:` name, and the backend container's image/command/port/env
-vars for this specific MCP server.
+Fill in every `TODO` in both files: the branch/MCP name (`on.push.branches`
+in the build file, `workflows:` and `head_branch` in the deploy file — the
+`name:` in the deploy file's `workflows:` list must match the build file's
+`name:` exactly), the `environment:` name in both, and the backend
+container's image/command/port/env vars for this specific MCP server in
+the deploy file.
 
 ## 3. Create the GitHub Environment
 
@@ -122,19 +146,36 @@ whatever you put in the workflow's `environment:` field).
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | upstream OAuth client |
 | any credential the backend MCP server needs | e.g. a service-account token |
 
-## 4. Push
+## 4. Push both files to their respective branches
 
 ```bash
-git add .github/workflows/deploy.yml
-git commit -m "Add deploy workflow for <mcp-name>"
+# deploy/<mcp-name>:
+git add .github/workflows/build.yml
+git commit -m "Add build workflow for <mcp-name>"
 git push -u origin deploy/<mcp-name>
+
+# main (separate branch + PR, since main is otherwise unrelated to any
+# one MCP's deploy):
+git checkout main && git checkout -b add-<mcp-name>-deploy-listener
+git add .github/workflows/deploy-<mcp-name>.yml
+git commit -m "Add deploy listener for <mcp-name>"
+git push -u origin add-<mcp-name>-deploy-listener
+# ...then open a PR into main.
 ```
+
+**Gotcha:** if the `<mcp-name>` GitHub Environment has a "Deployment
+branches" restriction configured, it must allow `main` — the deploy job
+actually *runs* in `main`'s branch context (that's the branch the deploy
+workflow file lives on), even though it only fires because of pushes to
+`deploy/<mcp-name>`. Restricting it to `deploy/<mcp-name>` only will make
+every deploy hang waiting on an approval that can't be granted, or fail
+outright.
 
 ## 5. The public URL is only known after the first deploy
 
 `PUBLIC_URL` (and therefore the OAuth redirect URI and the MCP `RESOURCE`
 URI) is whatever `*.run.app` URL Cloud Run happens to assign this service —
-which doesn't exist until the service is created. The template workflow
+which doesn't exist until the service is created. The deploy workflow
 handles this automatically:
 
 - **First run** on a brand-new service: deploys once with a placeholder
@@ -148,4 +189,5 @@ handles this automatically:
 ## 6. Repeat per MCP server
 
 Each new MCP server = a new `deploy/<name>` branch + a new GitHub
-Environment, following steps 1–5 again. `main` never changes for this.
+Environment + one small PR to `main` (just the deploy listener file, no
+MCP-specific vars/secrets), following steps 1–5 again.

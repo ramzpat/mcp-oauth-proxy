@@ -100,12 +100,18 @@ Trade-offs to accept:
 
 ## CI/CD: GitHub Actions
 
-This repo deploys each MCP server from its **own branch**, not `main`.
-`main` only carries the generic template + setup instructions —
-see [`deploy-template/README.md`](../../deploy-template/README.md).
-The actual grafana-mcp workflow (built from that template) lives on the
-`deploy/grafana-mcp` branch, with its own `.github/workflows/deploy.yml`
-and its config in the `grafana-mcp` GitHub Environment.
+This repo deploys each MCP server from its **own branch**, not `main`, via
+a pair of workflows (see [`deploy-template/README.md`](../../deploy-template/README.md)
+for the full setup and why they're split this way):
+
+- `.github/workflows/build.yml` on the `deploy/grafana-mcp` branch builds+
+  pushes the oauth-proxy image on every push to that branch.
+- `.github/workflows/deploy-grafana-mcp.yml` on `main` listens for that
+  build to finish and does the actual `gcloud run deploy`.
+
+Both read their config from the same `grafana-mcp` GitHub Environment —
+`main` carries no MCP-specific vars/secrets of its own, just this one
+generic listener file.
 
 ## Original docker-compose
 

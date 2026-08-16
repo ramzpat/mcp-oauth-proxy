@@ -1,0 +1,126 @@
+# Built from deploy-template/ -- see deploy-template/README.md for the
+# setup this assumes.
+#
+# The other half of the grafana-mcp build/deploy pair: fires when
+# `build grafana-mcp` (defined on the deploy/grafana-mcp branch, see
+# .github/workflows/build.yml there) finishes, downloads the image digest
+# it uploaded as an artifact, and deploys it to Cloud Run.
+#
+# This file has to live on `main` even though nothing else about
+# grafana-mcp's deploy does: GitHub only fires `workflow_run` for a
+# listener workflow that exists on the repo's *default* branch, no matter
+# which branch the triggering workflow ran on. Everything MCP-specific
+# still comes from the `grafana-mcp` GitHub Environment referenced below
+# -- this file carries no vars/secrets of its own, just the trigger
+# plumbing and the gcloud invocation, both generic and copied verbatim
+# from deploy-template/workflow-deploy.yml.template.
+#
+# Gotcha: this job *runs* in main's branch context (that's the branch this
+# workflow is defined on), even though it only fires because of pushes to
+# deploy/grafana-mcp. If the grafana-mcp Environment has a "Deployment
+# branches" restriction, it must allow `main` -- restricting it to
+# deploy/grafana-mcp only will make every deploy hang or fail.
+
+name: deploy grafana-mcp
+
+on:
+  workflow_run:
+    workflows: ["build grafana-mcp"]
+    types: [completed]
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation
+  actions: read # to download the build workflow's artifact
+
+jobs:
+  deploy:
+    if: >
+      github.event.workflow_run.head_branch == 'deploy/grafana-mcp' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: grafana-mcp
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      SERVICE: ${{ vars.SERVICE }}
+    steps:
+      - name: download built image digest
+        uses: actions/download-artifact@v4
+        with:
+          name: image-digest
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: deploy to Cloud Run
+        env:
+          ALLOWED_DOMAINS: ${{ vars.ALLOWED_DOMAINS }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GRAFANA_URL: ${{ vars.GRAFANA_URL }}
+          GRAFANA_SERVICE_ACCOUNT_TOKEN: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
+        run: |
+          set -euo pipefail
+          PROXY_IMAGE=$(cat image-digest.txt)
+
+          # `^##^` switches gcloud's list delimiter from "," to "##" so
+          # secret values containing commas can't break --set-env-vars.
+          deploy() {
+            local public_url="$1"
+            gcloud run deploy "$SERVICE" \
+              --project="$PROJECT_ID" \
+              --region="$REGION" \
+              --allow-unauthenticated \
+              --min-instances=0 --max-instances=3 \
+              --no-cpu-throttling \
+              --container=grafana-mcp \
+                --image=grafana/mcp-grafana:latest \
+                --command=-t,streamable-http,--allowed-hosts,127.0.0.1,--allowed-origins,127.0.0.1 \
+                --set-env-vars="^##^GRAFANA_URL=${GRAFANA_URL}##PORT=8000##HOST=127.0.0.1##GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_SERVICE_ACCOUNT_TOKEN}" \
+              --container=oauth-proxy \
+                --image="$PROXY_IMAGE" \
+                --port=8080 \
+                --startup-cpu-boost \
+                --depends-on=grafana-mcp \
+                --set-env-vars="^##^PUBLIC_URL=${public_url}##UPSTREAM_URL=http://127.0.0.1:8000##RESOURCE=${public_url}/mcp##ALLOWED_DOMAINS=${ALLOWED_DOMAINS}##SIGNING_KEY=${SIGNING_KEY}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
+          }
+
+          # Public URL is unknown until Cloud Run provisions the service for
+          # the first time -- see deploy-template/README.md step 5.
+          EXISTING_URL=$(gcloud run services describe "$SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" \
+            --format='value(status.url)' 2>/dev/null || true)
+
+          if [ -n "$EXISTING_URL" ]; then
+            echo "== Redeploying existing service (PUBLIC_URL=${EXISTING_URL}) =="
+            deploy "$EXISTING_URL"
+            SERVICE_URL="$EXISTING_URL"
+          else
+            echo "== First deploy: PUBLIC_URL isn't known yet -- bootstrapping =="
+            echo "== Phase 1/2: provisioning with a placeholder URL =="
+            deploy "https://placeholder.invalid"
+
+            SERVICE_URL=$(gcloud run services describe "$SERVICE" \
+              --project="$PROJECT_ID" --region="$REGION" \
+              --format='value(status.url)')
+
+            echo "== Phase 2/2: redeploying with the real PUBLIC_URL=${SERVICE_URL} =="
+            deploy "$SERVICE_URL"
+
+            echo
+            echo "New service -- register this redirect URI in your IdP console"
+            echo "before trying to log in (it wasn't knowable before this deploy):"
+            echo "  ${SERVICE_URL}/oauth2/callback"
+          fi
+
+          echo
+          echo "MCP endpoint: ${SERVICE_URL}/mcp"

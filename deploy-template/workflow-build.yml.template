@@ -1,0 +1,71 @@
+# TEMPLATE -- copy to .github/workflows/build.yml on a dedicated
+# deploy/<mcp-name> branch and fill in every TODO. See
+# deploy-template/README.md for full setup instructions (GAR + WIF
+# prerequisites, GitHub Environment, and the matching listener workflow
+# this pairs with on `main`).
+#
+# This is one half of a two-workflow pair -- see
+# workflow-deploy.yml.template for the other half and why they can't be
+# one workflow (or live on the same branch).
+#
+# Design baked into this template:
+#  - Builds only from this one branch, not main -- each MCP server gets its
+#    own branch + build workflow + GitHub Environment, so unrelated MCP
+#    deployments never trigger each other's CI.
+#  - Builds+pushes the image, then uploads the pushed image's digest (not
+#    its mutable tag) as a build artifact -- the paired deploy workflow on
+#    `main` downloads it and deploys exactly that digest, guaranteeing it
+#    ships what this workflow just built even if the tag gets overwritten
+#    later. Job outputs don't cross workflow boundaries, so an artifact is
+#    the mechanism that makes the two-workflow split possible at all.
+#  - All config comes from a GitHub Environment named after the branch/
+#    service: non-secret values as Environment variables, credentials as
+#    Environment secrets. No Google Secret Manager -- keeps every MCP's
+#    setup self-contained to GitHub.
+
+name: build <MCP_NAME> # TODO
+
+on:
+  push:
+    branches: [deploy/<MCP_NAME>] # TODO: this branch only
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: <MCP_NAME> # TODO: GitHub Environment holding the vars/secrets below
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      AR_REPO: ${{ vars.AR_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+
+      - name: build+push oauth-proxy image
+        run: |
+          set -euo pipefail
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/oauth-proxy:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE" > image-digest.txt
+          cat image-digest.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest
+          path: image-digest.txt
+          retention-days: 1
