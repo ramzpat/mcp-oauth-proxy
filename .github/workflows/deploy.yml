@@ -32,6 +32,12 @@ jobs:
 
   deploy:
     needs: prepare
+    # `with:` below is evaluated in *this* job's context, before the call
+    # happens -- without this, `vars.*` only sees repo/org-level
+    # variables, not the Environment-scoped ones (PROJECT_ID, REGION,
+    # etc.) actually configured under the "grafana-mcp" GitHub
+    # Environment, and every `with:` input silently resolves empty.
+    environment: grafana-mcp
     permissions:
       contents: read
       id-token: write # Workload Identity Federation -- deploy-service.yml needs this granted here to use it itself
