@@ -162,6 +162,7 @@ on:
 permissions:
   contents: read
   id-token: write # Workload Identity Federation
+  packages: read  # to resolve the oauth-proxy image's digest from ghcr.io
 
 jobs:
   deploy:
@@ -205,6 +206,29 @@ jobs:
           echo "::error::Neither allowed_domains nor allowed_emails is set -- app.py refuses to boot without at least one, so this would fail at container startup instead. Set one in the caller workflow / GitHub Environment."
           exit 1
 
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: resolve proxy image to a digest
+        id: resolve_proxy_image
+        run: |
+          set -euo pipefail
+          # Cloud Run pulls oauth-proxy through Google's Artifact Registry
+          # pull-through cache for ghcr.io, which caches a mutable tag's
+          # tag->digest mapping and doesn't reliably re-check ghcr.io for
+          # a newer image on every deploy -- confirmed the hard way: two
+          # consecutive redeploys both served the same stale digest well
+          # after a newer :latest had been published. Resolving the
+          # digest here (talking to ghcr.io directly, not through GCP's
+          # cache) and deploying pinned to that digest sidesteps it
+          # entirely -- an unseen digest is always fetched fresh.
+          DIGEST=$(docker buildx imagetools inspect "$PROXY_IMAGE" | awk '/^Digest:/{print $2; exit}')
+          echo "resolved digest: $DIGEST"
+          echo "image=${PROXY_IMAGE%%:*}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - id: auth
         uses: google-github-actions/auth@v2
         with:
@@ -214,6 +238,8 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: deploy to Cloud Run
+        env:
+          PROXY_IMAGE: ${{ steps.resolve_proxy_image.outputs.image }}
         run: |
           set -euo pipefail -x # -x: echo every gcloud invocation verbatim into the log
 
