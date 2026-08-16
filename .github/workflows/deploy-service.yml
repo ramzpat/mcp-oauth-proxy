@@ -29,6 +29,13 @@
 #    specified") -- a plain TCP check on the backend's own port is enough
 #    since we're only using it to sequence container startup, not for
 #    ongoing health monitoring.
+#  - backend_command becomes --args, not --command: --command overrides
+#    the image's ENTRYPOINT (the executable itself), so passing CLI flags
+#    there makes Cloud Run try to exec the first flag as a binary
+#    ("failed to resolve binary path: error finding executable "-t" in
+#    PATH"). --args overrides CMD -- arguments passed to the image's own
+#    entrypoint, which is what a "pass these CLI flags" input actually
+#    means for a normal image.
 
 name: deploy Cloud Run service (reusable)
 
@@ -71,15 +78,17 @@ on:
         type: string
       backend_command:
         description: >-
-          Comma-separated argv for the backend container. gcloud's
-          --command flag (which this becomes) rejects a literal value
-          repeated within the list -- e.g. the same "127.0.0.1" as both a
-          flag's value and another flag's value fails with "cannot be
-          specified multiple times". Use a textually distinct but
-          equivalent value if that happens (e.g. a full origin
-          "http://127.0.0.1:<port>" instead of a bare host, for a flag
-          that's semantically checking an Origin header rather than a
-          Host header).
+          Comma-separated CLI args passed to the backend image's own
+          ENTRYPOINT (becomes gcloud's --args, not --command -- --command
+          overrides ENTRYPOINT itself, which breaks a normal CLI-flags
+          image entirely; see the design note above). gcloud rejects a
+          literal value repeated within the list -- e.g. the same
+          "127.0.0.1" as both one flag's value and another flag's value
+          fails with "cannot be specified multiple times". Use a
+          textually distinct but equivalent value if that happens (e.g. a
+          full origin "http://127.0.0.1:<port>" instead of a bare host,
+          for a flag that's semantically checking an Origin header rather
+          than a Host header).
         required: true
         type: string
       backend_port:
@@ -151,7 +160,7 @@ jobs:
               --cpu-boost \
               --container=backend \
                 --image="$BACKEND_IMAGE" \
-                --command="$BACKEND_COMMAND" \
+                --args="$BACKEND_COMMAND" \
                 --set-env-vars="^##^PORT=${BACKEND_PORT}##HOST=127.0.0.1${backend_extra}" \
                 --startup-probe="tcpSocket.port=${BACKEND_PORT},timeoutSeconds=3,periodSeconds=3,failureThreshold=10" \
               --container=oauth-proxy \
