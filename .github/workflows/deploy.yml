@@ -85,7 +85,12 @@ jobs:
       # ENTRYPOINT wasn't reliably preserved by --args alone -- see
       # deploy-service.yml's backend_entrypoint input description.
       backend_entrypoint: /app/mcp-grafana
-      backend_command: -t,streamable-http,--allowed-hosts,127.0.0.1,--allowed-origins,http://127.0.0.1:8000
+      # --args replaces the image's baked-in CMD/entrypoint-args entirely
+      # (including its own default --address 0.0.0.0:8000), so --address
+      # has to be repeated here explicitly -- otherwise mcp-grafana falls
+      # back to its own internal default, which isn't guaranteed to match
+      # backend_port, and the startup probe on that port times out.
+      backend_command: -t,streamable-http,--address,0.0.0.0:8000,--allowed-hosts,127.0.0.1,--allowed-origins,http://127.0.0.1:8000
       backend_port: "8000"
       backend_env_vars: ${{ needs.prepare.outputs.backend_env_vars }}
     secrets: inherit
