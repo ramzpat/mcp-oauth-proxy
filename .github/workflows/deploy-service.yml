@@ -11,13 +11,21 @@
 #  - `environment: ${{ inputs.environment }}` scopes the job to the
 #    caller's GitHub Environment, so its required-reviewer / deployment-
 #    branch protection rules (if any) apply here too.
-#  - Backend-specific secrets (e.g. a Grafana service-account token) can't
-#    be declared here by name -- every MCP server needs different ones.
-#    Callers compose a single `backend_env_vars` string themselves (in
-#    their own job, with their own secrets) and pass the *result* as a
-#    plain input -- GitHub Actions masks the underlying secret values in
-#    logs wherever they appear, so this doesn't leak them, it just avoids
-#    this workflow needing to know their names in advance.
+#  - backend_env_vars (a plain input) is for NON-secret extra backend
+#    config only, e.g. GRAFANA_URL. A single generic BACKEND_SECRET slot
+#    covers one backend-specific credential (paired with the
+#    backend_secret_env_name input, which says what env var name to
+#    expose it as on the backend container) -- callers map their actual
+#    secret onto it explicitly: `secrets: { BACKEND_SECRET: ${{
+#    secrets.THEIR_SECRET_NAME }}, ... }`. This has to be a real named
+#    `secrets:` entry, not something composed into a job output: GitHub
+#    silently blanks any job output whose value contains a secret when
+#    it's read cross-job (via needs.<job>.outputs.<name>) -- a real,
+#    documented leak-prevention guardrail, confirmed the hard way here
+#    (an earlier design routed a Grafana service-account token through a
+#    prepare job's output, which always arrived empty at this workflow no
+#    matter how it was composed, while every secret-free output worked
+#    fine).
 #  - PUBLIC_URL/RESOURCE aren't known until Cloud Run assigns the service
 #    its *.run.app URL. The very first deploy of a new service bootstraps
 #    in two phases (deploy with a placeholder URL to provision the
@@ -125,8 +133,19 @@ on:
         type: string
       backend_env_vars:
         description: >-
-          Extra backend env vars, "##"-delimited KEY=VALUE pairs (e.g.
-          composed by the caller from its own vars/secrets). Optional.
+          Extra NON-secret backend env vars, "##"-delimited KEY=VALUE
+          pairs (e.g. composed by the caller from its own vars). For a
+          secret, use backend_secret_env_name + the BACKEND_SECRET secret
+          instead -- see the design note above for why.
+        required: false
+        type: string
+        default: ""
+      backend_secret_env_name:
+        description: >-
+          Env var name to expose the BACKEND_SECRET secret as on the
+          backend container, e.g. "GRAFANA_SERVICE_ACCOUNT_TOKEN". Leave
+          unset (with BACKEND_SECRET also unset) if the backend needs no
+          such credential.
         required: false
         type: string
         default: ""
@@ -137,6 +156,8 @@ on:
         required: true
       GOOGLE_CLIENT_SECRET:
         required: true
+      BACKEND_SECRET:
+        required: false
 
 permissions:
   contents: read
@@ -158,6 +179,8 @@ jobs:
       BACKEND_COMMAND: ${{ inputs.backend_command }}
       BACKEND_PORT: ${{ inputs.backend_port }}
       BACKEND_ENV_VARS: ${{ inputs.backend_env_vars }}
+      BACKEND_SECRET_ENV_NAME: ${{ inputs.backend_secret_env_name }}
+      BACKEND_SECRET: ${{ secrets.BACKEND_SECRET }}
       SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -170,8 +193,11 @@ jobs:
           echo "allowed_domains input as received: '${{ inputs.allowed_domains }}'"
           echo "allowed_emails input as received:  '${{ inputs.allowed_emails }}'"
           echo "backend_env_vars input length:     ${#BACKEND_ENV_VARS_CHECK}"
+          echo "backend_secret_env_name received:  '${{ inputs.backend_secret_env_name }}'"
+          echo "BACKEND_SECRET raw length:          ${#BACKEND_SECRET_CHECK}"
         env:
           BACKEND_ENV_VARS_CHECK: ${{ inputs.backend_env_vars }}
+          BACKEND_SECRET_CHECK: ${{ secrets.BACKEND_SECRET }}
 
       - name: fail fast if neither allowlist is set
         if: inputs.allowed_domains == '' && inputs.allowed_emails == ''
@@ -197,6 +223,7 @@ jobs:
             local public_url="$1"
             local backend_extra=""
             [ -n "$BACKEND_ENV_VARS" ] && backend_extra="##${BACKEND_ENV_VARS}"
+            [ -n "$BACKEND_SECRET_ENV_NAME" ] && backend_extra="${backend_extra}##${BACKEND_SECRET_ENV_NAME}=${BACKEND_SECRET}"
 
             gcloud run deploy "$SERVICE" \
               --project="$PROJECT_ID" \
