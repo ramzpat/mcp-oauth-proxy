@@ -142,6 +142,7 @@ jobs:
               --allow-unauthenticated \
               --min-instances=0 --max-instances=3 \
               --no-cpu-throttling \
+              --cpu-boost \
               --container=backend \
                 --image="$BACKEND_IMAGE" \
                 --command="$BACKEND_COMMAND" \
@@ -149,7 +150,6 @@ jobs:
               --container=oauth-proxy \
                 --image="$PROXY_IMAGE" \
                 --port=8080 \
-                --cpu-boost \
                 --depends-on=backend \
                 --set-env-vars="^##^PUBLIC_URL=${public_url}##UPSTREAM_URL=http://127.0.0.1:${BACKEND_PORT}##RESOURCE=${public_url}/mcp##ALLOWED_DOMAINS=${ALLOWED_DOMAINS}##SIGNING_KEY=${SIGNING_KEY}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
           }
