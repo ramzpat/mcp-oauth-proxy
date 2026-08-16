@@ -23,6 +23,12 @@
 #    in two phases (deploy with a placeholder URL to provision the
 #    service, then redeploy with the real one); every deploy after that
 #    reuses the already-assigned URL in a single shot.
+#  - oauth-proxy --depends-on=backend requires the backend container to
+#    have an explicit startup probe (Cloud Run rejects the deploy
+#    otherwise: "Dependent container 'backend' must have startup probe
+#    specified") -- a plain TCP check on the backend's own port is enough
+#    since we're only using it to sequence container startup, not for
+#    ongoing health monitoring.
 
 name: deploy Cloud Run service (reusable)
 
@@ -147,6 +153,7 @@ jobs:
                 --image="$BACKEND_IMAGE" \
                 --command="$BACKEND_COMMAND" \
                 --set-env-vars="^##^PORT=${BACKEND_PORT}##HOST=127.0.0.1${backend_extra}" \
+                --startup-probe="tcpSocket.port=${BACKEND_PORT},timeoutSeconds=3,periodSeconds=3,failureThreshold=10" \
               --container=oauth-proxy \
                 --image="$PROXY_IMAGE" \
                 --port=8080 \
