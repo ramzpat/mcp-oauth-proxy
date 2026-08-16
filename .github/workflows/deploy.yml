@@ -85,15 +85,21 @@ jobs:
       # back to its own internal default, which isn't guaranteed to match
       # backend_port, and the startup probe on that port times out.
       #
-      # --allowed-hosts/--allowed-origins "*" (matching the original
-      # docker-compose.original.yml this deployment was ported from):
-      # this backend only listens on loopback, fully gated by oauth-proxy
-      # in front of it, so its own Host/Origin DNS-rebinding check adds no
-      # real security value here -- and a narrower value ("127.0.0.1",
-      # tried earlier) rejected the proxy's own server-to-server request
-      # with a 403, since that's a plain httpx call (no browser-style
-      # Origin header, and Host doesn't necessarily match byte-for-byte).
-      backend_command: -t,streamable-http,--address,0.0.0.0:8000,--allowed-hosts,*,--allowed-origins,*
+      # --allowed-hosts/--allowed-origins deliberately NOT passed --
+      # mcp-grafana's own documented defaults already do exactly what's
+      # needed: --allowed-hosts defaults to loopback variants of
+      # --address including the exact port ("127.0.0.1:8000" etc.),
+      # which matches the proxy's forwarded Host header exactly, and
+      # --allowed-origins defaults to empty (meaning the check only
+      # fires if a request carries an Origin header at all -- the
+      # proxy's httpx call is server-to-server and never sends one, so
+      # it never triggers). An earlier explicit "127.0.0.1" (no port)
+      # didn't match the real Host header and got a 403; "*" for both
+      # would work too but collides with gcloud's --args duplicate-value
+      # rejection ("cannot be specified multiple times") since both
+      # flags would need the identical literal "*". Omitting both
+      # entirely sidesteps that and is more correct anyway.
+      backend_command: -t,streamable-http,--address,0.0.0.0:8000
       backend_port: "8000"
       backend_env_vars: ${{ needs.prepare.outputs.backend_env_vars }}
       backend_secret_env_name: GRAFANA_SERVICE_ACCOUNT_TOKEN
