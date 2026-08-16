@@ -209,6 +209,14 @@ jobs:
 
   deploy:
     needs: prepare
+    # `with:` below is evaluated in *this* job's context, before the call
+    # happens -- without `environment:` set here too, `vars.*` only sees
+    # repo/org-level variables, not the ones configured under this
+    # Environment, and every input below silently resolves empty.
+    environment: <name>
+    permissions:
+      contents: read
+      id-token: write # deploy-service.yml needs this granted here to use it itself
     uses: <owner>/mcp-oauth-proxy/.github/workflows/deploy-service.yml@main
     with:
       environment: <name>
