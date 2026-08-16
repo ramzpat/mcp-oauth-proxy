@@ -3,22 +3,20 @@
 # new MCP server to Cloud Run" section for the shape this follows.
 #
 # `prepare` runs with `environment: grafana-mcp` so it can see this MCP's
-# Environment-scoped vars/secrets, and republishes everything the `deploy`
-# job's `with:` needs as plain job outputs. Two reasons `deploy` can't just
-# read `vars.*`/`secrets.*` itself: a job that calls a reusable workflow
-# (`uses:`) doesn't support an `environment:` key at all (GitHub rejects
-# the whole job as malformed if you add one), and even if it did, `with:`
-# can't reference `secrets` directly regardless. Composing everything in
-# `prepare` and passing it via `needs.prepare.outputs.*` sidesteps both.
+# Environment-scoped vars, and republishes the non-secret ones as plain
+# job outputs for the `deploy` job's `with:` (a job that calls a reusable
+# workflow via `uses:` can't have `environment:` itself, so it can't read
+# `vars.*` directly).
 #
-# backend_env_vars is composed *directly* in the `outputs:` mapping below
-# (an ordinary job's own `${{ }}` expressions there have full vars/secrets
-# access -- only a job that itself calls a reusable workflow is
-# restricted). An earlier version routed this through a shell step's
-# $GITHUB_OUTPUT instead; that round-trip reproducibly came through empty
-# at deploy-service.yml's end despite the step itself printing the
-# correct composed value moments earlier in the same run -- direct
-# expression interpolation sidesteps whatever that was.
+# GRAFANA_SERVICE_ACCOUNT_TOKEN is a real secret, and does NOT go through
+# `prepare`'s outputs at all -- GitHub silently blanks any job output
+# whose value contains a secret when it's read cross-job, so nothing
+# secret-derived can survive that trip regardless of how it's composed
+# (confirmed the hard way: this used to route through prepare and always
+# arrived empty at deploy-service.yml). It's passed instead via the
+# `secrets:` map on the `deploy` job below, onto deploy-service.yml's
+# generic BACKEND_SECRET slot -- the one channel actually designed to
+# carry a secret across a reusable-workflow-call boundary.
 #
 # No build step here anymore: the oauth-proxy image is generic and built
 # once on main (.github/workflows/build.yml there), published to
@@ -43,7 +41,7 @@ jobs:
       deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
       allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
       allowed_emails: ${{ vars.ALLOWED_EMAILS }}
-      backend_env_vars: GRAFANA_URL=${{ vars.GRAFANA_URL }}##GRAFANA_SERVICE_ACCOUNT_TOKEN=${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
+      backend_env_vars: GRAFANA_URL=${{ vars.GRAFANA_URL }}
     # NOTE: the outputs: block above IS what the `deploy` job's `with:`
     # reads via needs.prepare.outputs.* -- these expressions are evaluated
     # by GitHub directly against this job's `environment:`, no step/shell
@@ -56,7 +54,7 @@ jobs:
           echo "ALLOWED_DOMAINS (vars)     = '${{ vars.ALLOWED_DOMAINS }}'"
           echo "ALLOWED_EMAILS (vars)      = '${{ vars.ALLOWED_EMAILS }}'"
           echo "GRAFANA_URL (vars)         = '${{ vars.GRAFANA_URL }}' (length ${#GRAFANA_URL_RAW})"
-          echo "GRAFANA_TOKEN raw length   = ${#GRAFANA_TOKEN_RAW} (0 means unset/empty in the Environment)"
+          echo "GRAFANA_TOKEN raw length   = ${#GRAFANA_TOKEN_RAW} (0 means unset/empty in the Environment -- this one bypasses prepare's outputs entirely now, see deploy job's secrets: below)"
         env:
           GRAFANA_URL_RAW: ${{ vars.GRAFANA_URL }}
           GRAFANA_TOKEN_RAW: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
@@ -95,4 +93,13 @@ jobs:
       backend_command: -t,streamable-http,--address,0.0.0.0:8000,--allowed-hosts,127.0.0.1,--allowed-origins,http://127.0.0.1:8000
       backend_port: "8000"
       backend_env_vars: ${{ needs.prepare.outputs.backend_env_vars }}
-    secrets: inherit
+      backend_secret_env_name: GRAFANA_SERVICE_ACCOUNT_TOKEN
+    # Explicit map, not `secrets: inherit` -- BACKEND_SECRET has to be
+    # *renamed* from this Environment's actual GRAFANA_SERVICE_ACCOUNT_TOKEN
+    # secret onto deploy-service.yml's generic slot, which inherit can't do
+    # (it forwards secrets under their original names only).
+    secrets:
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      BACKEND_SECRET: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
