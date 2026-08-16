@@ -85,7 +85,16 @@ def sign(payload: dict) -> str:
 
 
 def verify(token: str, expected_typ: Optional[str] = None) -> dict:
-    payload = pyjwt.decode(token, SIGNING_KEY, algorithms=[JWT_ALG])
+    # verify_aud=False: PyJWT refuses to decode a token carrying an "aud"
+    # claim unless you pass audience=<expected value> to decode() -- it
+    # raises InvalidAudienceError otherwise, even before returning the
+    # payload for inspection. Access/refresh tokens always carry "aud"
+    # (see _issue_tokens), and mcp_proxy does its own explicit
+    # claims.get("aud") != RESOURCE check right after this returns, so
+    # PyJWT's own check is both redundant and, without an audience= this
+    # generic across token types, was rejecting every access token
+    # outright.
+    payload = pyjwt.decode(token, SIGNING_KEY, algorithms=[JWT_ALG], options={"verify_aud": False})
     if expected_typ and payload.get("typ") != expected_typ:
         raise pyjwt.InvalidTokenError(f"expected typ={expected_typ}")
     return payload
