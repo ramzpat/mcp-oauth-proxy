@@ -56,8 +56,14 @@ jobs:
       workload_identity_provider: ${{ needs.prepare.outputs.workload_identity_provider }}
       deployer_service_account: ${{ needs.prepare.outputs.deployer_service_account }}
       allowed_domains: ${{ needs.prepare.outputs.allowed_domains }}
+      # --allowed-origins uses the full origin (scheme://host:port), not
+      # the bare host -- that's the semantically correct value for an
+      # Origin-header check anyway, and it also has to differ textually
+      # from --allowed-hosts' bare "127.0.0.1": gcloud's --command rejects
+      # a value repeated within one flag ("cannot be specified multiple
+      # times"), so the literal duplicate broke this deploy.
       backend_image: grafana/mcp-grafana:latest
-      backend_command: -t,streamable-http,--allowed-hosts,127.0.0.1,--allowed-origins,127.0.0.1
+      backend_command: -t,streamable-http,--allowed-hosts,127.0.0.1,--allowed-origins,http://127.0.0.1:8000
       backend_port: "8000"
       backend_env_vars: ${{ needs.prepare.outputs.backend_env_vars }}
     secrets: inherit
