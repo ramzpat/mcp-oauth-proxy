@@ -64,9 +64,21 @@ on:
         required: true
         type: string
       allowed_domains:
-        description: Comma-separated Workspace domains allowed to log in
-        required: true
+        description: >-
+          Comma-separated Workspace domains allowed to log in. At least one
+          of allowed_domains/allowed_emails must be non-empty -- app.py
+          refuses to start otherwise.
+        required: false
         type: string
+        default: ""
+      allowed_emails:
+        description: >-
+          Comma-separated exact emails allowed to log in. At least one of
+          allowed_domains/allowed_emails must be non-empty -- app.py
+          refuses to start otherwise.
+        required: false
+        type: string
+        default: ""
       proxy_image_tag:
         description: Tag of ghcr.io/<repo> to deploy
         required: false
@@ -123,6 +135,7 @@ jobs:
       REGION: ${{ inputs.region }}
       SERVICE: ${{ inputs.service }}
       ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
+      ALLOWED_EMAILS: ${{ inputs.allowed_emails }}
       PROXY_IMAGE: ghcr.io/${{ github.repository }}:${{ inputs.proxy_image_tag }}
       BACKEND_IMAGE: ${{ inputs.backend_image }}
       BACKEND_COMMAND: ${{ inputs.backend_command }}
@@ -136,6 +149,17 @@ jobs:
         run: |
           echo "deploy-service.yml resolved from: ${{ github.workflow_ref }}"
           echo "backend_command input as received: ${{ inputs.backend_command }}"
+          echo "allowed_domains input as received: '${{ inputs.allowed_domains }}'"
+          echo "allowed_emails input as received:  '${{ inputs.allowed_emails }}'"
+          echo "backend_env_vars input length:     ${#BACKEND_ENV_VARS_CHECK}"
+        env:
+          BACKEND_ENV_VARS_CHECK: ${{ inputs.backend_env_vars }}
+
+      - name: fail fast if neither allowlist is set
+        if: inputs.allowed_domains == '' && inputs.allowed_emails == ''
+        run: |
+          echo "::error::Neither allowed_domains nor allowed_emails is set -- app.py refuses to boot without at least one, so this would fail at container startup instead. Set one in the caller workflow / GitHub Environment."
+          exit 1
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -172,7 +196,7 @@ jobs:
                 --image="$PROXY_IMAGE" \
                 --port=8080 \
                 --depends-on=backend \
-                --set-env-vars="^##^PUBLIC_URL=${public_url}##UPSTREAM_URL=http://127.0.0.1:${BACKEND_PORT}##RESOURCE=${public_url}/mcp##ALLOWED_DOMAINS=${ALLOWED_DOMAINS}##SIGNING_KEY=${SIGNING_KEY}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
+                --set-env-vars="^##^PUBLIC_URL=${public_url}##UPSTREAM_URL=http://127.0.0.1:${BACKEND_PORT}##RESOURCE=${public_url}/mcp##ALLOWED_DOMAINS=${ALLOWED_DOMAINS}##ALLOWED_EMAILS=${ALLOWED_EMAILS}##SIGNING_KEY=${SIGNING_KEY}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
           }
 
           # Public URL is unknown until Cloud Run provisions the service
