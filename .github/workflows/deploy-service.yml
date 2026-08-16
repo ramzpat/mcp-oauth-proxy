@@ -29,13 +29,15 @@
 #    specified") -- a plain TCP check on the backend's own port is enough
 #    since we're only using it to sequence container startup, not for
 #    ongoing health monitoring.
-#  - backend_command becomes --args, not --command: --command overrides
-#    the image's ENTRYPOINT (the executable itself), so passing CLI flags
-#    there makes Cloud Run try to exec the first flag as a binary
+#  - Backend container gets BOTH --command=backend_entrypoint (the real
+#    binary path) and --args=backend_command (CLI flags), not just the
+#    latter. --command overrides ENTRYPOINT and --args overrides CMD in
+#    principle, so args-only *should* leave a baked-in ENTRYPOINT intact
+#    -- but Cloud Run's multi-container --args has been observed to drop
+#    it anyway, launching the args list with no binary at position 0
 #    ("failed to resolve binary path: error finding executable "-t" in
-#    PATH"). --args overrides CMD -- arguments passed to the image's own
-#    entrypoint, which is what a "pass these CLI flags" input actually
-#    means for a normal image.
+#    PATH"). Pinning --command explicitly sidesteps that regardless of
+#    which side the bug is actually on.
 
 name: deploy Cloud Run service (reusable)
 
@@ -88,15 +90,29 @@ on:
         description: Unmodified MCP server image, e.g. grafana/mcp-grafana:latest
         required: true
         type: string
+      backend_entrypoint:
+        description: >-
+          Absolute path to the backend image's own binary (becomes
+          gcloud's --command). In principle --args alone (leaving the
+          image's baked-in ENTRYPOINT untouched) should be enough, but
+          Cloud Run's multi-container --args has been observed to drop
+          the image's ENTRYPOINT entirely, launching the raw args list
+          as if the first flag were the binary itself ("failed to
+          resolve binary path: error finding executable "-t" in PATH").
+          Pinning --command explicitly to the real binary sidesteps
+          that regardless of which side the bug is actually on. Find it
+          with `docker inspect <image> --format='{{.Config.Entrypoint}}'`.
+        required: true
+        type: string
       backend_command:
         description: >-
-          Comma-separated CLI args passed to the backend image's own
-          ENTRYPOINT (becomes gcloud's --args, not --command -- --command
-          overrides ENTRYPOINT itself, which breaks a normal CLI-flags
-          image entirely; see the design note above). gcloud rejects a
-          literal value repeated within the list -- e.g. the same
-          "127.0.0.1" as both one flag's value and another flag's value
-          fails with "cannot be specified multiple times". Use a
+          Comma-separated CLI args appended after backend_entrypoint
+          (becomes gcloud's --args). Overrides the image's own default
+          CMD/args, but NOT its ENTRYPOINT's own baked-in flags (if any)
+          -- repeat those here too if they'd otherwise be lost. gcloud
+          rejects a literal value repeated within the list -- e.g. the
+          same "127.0.0.1" as both one flag's value and another flag's
+          value fails with "cannot be specified multiple times". Use a
           textually distinct but equivalent value if that happens (e.g. a
           full origin "http://127.0.0.1:<port>" instead of a bare host,
           for a flag that's semantically checking an Origin header rather
@@ -138,6 +154,7 @@ jobs:
       ALLOWED_EMAILS: ${{ inputs.allowed_emails }}
       PROXY_IMAGE: ghcr.io/${{ github.repository }}:${{ inputs.proxy_image_tag }}
       BACKEND_IMAGE: ${{ inputs.backend_image }}
+      BACKEND_ENTRYPOINT: ${{ inputs.backend_entrypoint }}
       BACKEND_COMMAND: ${{ inputs.backend_command }}
       BACKEND_PORT: ${{ inputs.backend_port }}
       BACKEND_ENV_VARS: ${{ inputs.backend_env_vars }}
@@ -148,6 +165,7 @@ jobs:
       - name: diagnostics -- confirm which commit of this workflow actually ran
         run: |
           echo "deploy-service.yml resolved from: ${{ github.workflow_ref }}"
+          echo "backend_entrypoint input as received: ${{ inputs.backend_entrypoint }}"
           echo "backend_command input as received: ${{ inputs.backend_command }}"
           echo "allowed_domains input as received: '${{ inputs.allowed_domains }}'"
           echo "allowed_emails input as received:  '${{ inputs.allowed_emails }}'"
@@ -189,6 +207,7 @@ jobs:
               --cpu-boost \
               --container=backend \
                 --image="$BACKEND_IMAGE" \
+                --command="$BACKEND_ENTRYPOINT" \
                 --args="$BACKEND_COMMAND" \
                 --set-env-vars="^##^PORT=${BACKEND_PORT}##HOST=127.0.0.1${backend_extra}" \
                 --startup-probe="tcpSocket.port=${BACKEND_PORT},timeoutSeconds=3,periodSeconds=3,failureThreshold=10" \
