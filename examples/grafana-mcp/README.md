@@ -98,6 +98,23 @@ Trade-offs to accept:
   refreshes immediately, but an already-issued access token remains valid
   until it expires.
 
+## The oauth-proxy image
+
+`main`'s [`.github/workflows/build.yml`](../../.github/workflows/build.yml)
+builds+publishes the proxy image to GitHub Container Registry on every
+push to `main` — one shared, generic image (no MCP-specific config baked
+in) that any MCP server's deployment can pull:
+
+```
+ghcr.io/<owner>/mcp-oauth-proxy:latest
+```
+
+Actually deploying it (to Cloud Run or elsewhere) — wiring up this image,
+`grafana/mcp-grafana:latest`, and this MCP server's vars/secrets into a
+running service — is this example's own concern, not `main`'s. See
+[`deploy.sh`](deploy.sh) and [`secrets-setup.sh`](secrets-setup.sh) for
+the manual path.
+
 ## Original docker-compose
 
 See [`docker-compose.original.yml`](docker-compose.original.yml) — the
