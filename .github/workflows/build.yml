@@ -1,0 +1,77 @@
+# Built from deploy-template/ -- see deploy-template/README.md for the
+# setup this assumes (GAR + WIF prerequisites, the `grafana-mcp` GitHub
+# Environment, and the matching listener workflow on `main`).
+#
+# This is one half of a two-workflow pair:
+#  - build.yml (this file, on this branch): builds+pushes the oauth-proxy
+#    image on every push to this branch, and uploads the pushed image's
+#    digest as a build artifact.
+#  - .github/workflows/deploy-grafana-mcp.yml (on `main`): a `workflow_run`
+#    listener that fires when this workflow completes, downloads the
+#    digest artifact, and does the actual `gcloud run deploy`.
+#
+# They can't be one workflow with two jobs and stay on this branch, and
+# they can't both live here either: GitHub only fires `workflow_run` for a
+# listener workflow that exists on the repo's *default* branch, regardless
+# of which branch the triggering workflow ran on. So the listener has to
+# live on `main`, even though nothing else about this MCP's deploy does.
+# Passing the image via an artifact (rather than a job output) is what
+# makes that split possible -- job outputs don't cross workflow/workflow
+# boundaries, only artifacts (and outputs within the *same* workflow) do.
+#
+# Splitting the actual `gcloud run deploy` into its own workflow (vs. just
+# a second job in this one) means a build failure can never touch the live
+# Cloud Run revision, and pinning the deploy to the pushed image's digest
+# (not its mutable tag) guarantees it deploys exactly what this workflow
+# just built -- not a same-tag image that could've been overwritten in the
+# meantime.
+
+name: build grafana-mcp
+
+on:
+  push:
+    branches: [deploy/grafana-mcp]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: grafana-mcp
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      AR_REPO: ${{ vars.AR_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+
+      - name: build+push oauth-proxy image
+        run: |
+          set -euo pipefail
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/oauth-proxy:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+          # Digest, not the mutable tag -- so the deploy workflow deploys
+          # exactly this build, even if the tag gets overwritten later.
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE" > image-digest.txt
+          cat image-digest.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest
+          path: image-digest.txt
+          retention-days: 1

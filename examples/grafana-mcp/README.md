@@ -101,17 +101,36 @@ Trade-offs to accept:
 ## CI/CD: GitHub Actions
 
 This branch (`deploy/grafana-mcp`) deploys automatically on every push to
-itself, via [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml)
-— built from [`deploy-template/`](../../deploy-template) on `main`, which
-also has the full setup walkthrough. `main` never triggers a deploy; each
-MCP server gets its own `deploy/<name>` branch like this one.
+itself, via two separate workflows — built from
+[`deploy-template/`](../../deploy-template) on `main`, which also has the
+full setup walkthrough:
 
-The workflow is two jobs: `build` builds+pushes the oauth-proxy image to
-Artifact Registry (tagged with the commit SHA, resolved to its digest), then
-`deploy` (which needs `build`) rolls that exact image out to Cloud Run. Both
-jobs run under the same `grafana-mcp` GitHub Environment — `build` only
-needs its non-secret vars (to authenticate and tag/push the image), `deploy`
-also needs its secrets (to configure the containers' env vars).
+- [`.github/workflows/build.yml`](../../.github/workflows/build.yml) (on
+  **this branch**): builds+pushes the oauth-proxy image to Artifact
+  Registry, resolves it to its digest, and uploads that digest as a build
+  artifact.
+- [`.github/workflows/deploy-grafana-mcp.yml`](https://github.com/ramzpat/mcp-oauth-proxy/blob/main/.github/workflows/deploy-grafana-mcp.yml)
+  (on **`main`**): a `workflow_run` listener that fires when the build
+  workflow above completes, downloads the digest artifact, and does the
+  actual `gcloud run deploy`.
+
+They're two separate *workflows* (not just jobs) so a build failure can
+never touch the live Cloud Run revision, and the digest — not a mutable
+tag — guarantees the deploy is exactly what was just built. The listener
+has to live on `main` even though nothing else about this MCP's config
+does: GitHub only fires `workflow_run` for a listener workflow that exists
+on the repo's default branch, regardless of which branch triggered it.
+`main` still never *builds* or holds any of this MCP's vars/secrets —
+those all stay in the `grafana-mcp` GitHub Environment below, which both
+workflows reference identically.
+
+> **Gotcha:** if you set a "Deployment branches" restriction on the
+> `grafana-mcp` Environment, it has to allow `main` — the deploy workflow
+> actually *runs* in `main`'s branch context (that's the branch it's
+> defined on), even though it only fires because of activity on
+> `deploy/grafana-mcp`. Restricting the Environment to `deploy/grafana-mcp`
+> only will make every deploy hang waiting for an approval that can't be
+> granted, or fail outright.
 
 Before the first push, do the one-time GCP setup (Artifact Registry repo +
 Workload Identity Federation — see `deploy-template/README.md` step 0),
