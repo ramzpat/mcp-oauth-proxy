@@ -98,52 +98,54 @@ Trade-offs to accept:
   refreshes immediately, but an already-issued access token remains valid
   until it expires.
 
+## The oauth-proxy image
+
+`main`'s [`.github/workflows/build.yml`](../../.github/workflows/build.yml)
+builds+publishes the proxy image to GitHub Container Registry on every
+push to `main` — one shared, generic image (no MCP-specific config baked
+in) that any MCP server's deployment can pull:
+
+```
+ghcr.io/ramzpat/mcp-oauth-proxy:latest
+```
+
 ## CI/CD: GitHub Actions
 
 This branch (`deploy/grafana-mcp`) deploys automatically on every push to
-itself, via two separate workflows — built from
-[`deploy-template/`](../../deploy-template) on `main`, which also has the
-full setup walkthrough:
+itself, via [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml)
+— a thin caller of the reusable
+[`deploy-service.yml`](https://github.com/ramzpat/mcp-oauth-proxy/blob/main/.github/workflows/deploy-service.yml)
+workflow on `main` (see that repo's `README.md` → "Deploying a new MCP
+server to Cloud Run" for the full shape and setup walkthrough).
 
-- [`.github/workflows/build.yml`](../../.github/workflows/build.yml) (on
-  **this branch**): builds+pushes the oauth-proxy image to Artifact
-  Registry, resolves it to its digest, and uploads that digest as a build
-  artifact.
-- [`.github/workflows/deploy-grafana-mcp.yml`](https://github.com/ramzpat/mcp-oauth-proxy/blob/main/.github/workflows/deploy-grafana-mcp.yml)
-  (on **`main`**): a `workflow_run` listener that fires when the build
-  workflow above completes, downloads the digest artifact, and does the
-  actual `gcloud run deploy`.
+There's no build step on this branch: the image above is generic and
+built once on `main`. This workflow just deploys it — no Artifact
+Registry, no WIF-authenticated `docker push` here, nothing to build.
 
-They're two separate *workflows* (not just jobs) so a build failure can
-never touch the live Cloud Run revision, and the digest — not a mutable
-tag — guarantees the deploy is exactly what was just built. The listener
-has to live on `main` even though nothing else about this MCP's config
-does: GitHub only fires `workflow_run` for a listener workflow that exists
-on the repo's default branch, regardless of which branch triggered it.
-`main` still never *builds* or holds any of this MCP's vars/secrets —
-those all stay in the `grafana-mcp` GitHub Environment below, which both
-workflows reference identically.
+The workflow is two jobs:
 
-> **Gotcha:** if you set a "Deployment branches" restriction on the
-> `grafana-mcp` Environment, it has to allow `main` — the deploy workflow
-> actually *runs* in `main`'s branch context (that's the branch it's
-> defined on), even though it only fires because of activity on
-> `deploy/grafana-mcp`. Restricting the Environment to `deploy/grafana-mcp`
-> only will make every deploy hang waiting for an approval that can't be
-> granted, or fail outright.
+- `prepare`: composes `GRAFANA_URL`/`GRAFANA_SERVICE_ACCOUNT_TOKEN` into
+  the single `backend_env_vars` string the reusable workflow expects —
+  needed because a reusable workflow's `with:` can't reference the
+  `secrets` context directly, so this MCP's own credential has to be
+  turned into a plain job output first.
+- `deploy`: calls `deploy-service.yml@main` with this branch's Cloud
+  Run/WIF config and that composed string, `secrets: inherit`-ing
+  `SIGNING_KEY`/`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` through
+  automatically.
 
-Before the first push, do the one-time GCP setup (Artifact Registry repo +
-Workload Identity Federation — see `deploy-template/README.md` step 0),
-then create a GitHub Environment named **`grafana-mcp`** with:
+Before the first push, do the one-time GCP setup (Workload Identity
+Federation + a deployer service account — no Artifact Registry repo
+needed; see the setup walkthrough linked above), then create a GitHub
+Environment named **`grafana-mcp`** with:
 
 **Variables:**
 
 | Name | Meaning |
 |---|---|
 | `PROJECT_ID` | GCP project ID |
-| `REGION` | Cloud Run / Artifact Registry region, e.g. `asia-southeast1` |
+| `REGION` | Cloud Run region, e.g. `asia-southeast1` |
 | `SERVICE` | Cloud Run service name, e.g. `grafana-mcp` |
-| `AR_REPO` | Artifact Registry repo, e.g. `mcp` |
 | `WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name from the one-time setup |
 | `DEPLOYER_SERVICE_ACCOUNT` | `gh-deployer@<project>.iam.gserviceaccount.com` |
 | `ALLOWED_DOMAINS` | Comma-separated allowed Workspace domains, e.g. `pattaravut.info` |
@@ -158,14 +160,15 @@ then create a GitHub Environment named **`grafana-mcp`** with:
 | `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Grafana service account token for `mcp-grafana` |
 
 These live entirely in this GitHub Environment — no Google Secret Manager
-involved (see `deploy-template/README.md` for the trade-off this implies).
+involved. If the `ghcr.io` image is private, Cloud Run also needs a way to
+pull it (make the package public, or mirror it via an Artifact Registry
+remote repository) — see the setup walkthrough on `main` for details.
 
 **The public `*.run.app` URL isn't known until the first deploy finishes** —
-the workflow bootstraps in two phases on a brand-new service (placeholder
-URL, then a redeploy with the real one) and prints the OAuth redirect URI
-to register at the end. Every push after that is a single, direct
-redeploy since the URL is already known. See `deploy-template/README.md`
-step 5 for details.
+the reusable workflow bootstraps in two phases on a brand-new service
+(placeholder URL, then a redeploy with the real one) and prints the OAuth
+redirect URI to register at the end. Every push after that is a single,
+direct redeploy since the URL is already known.
 
 ## Original docker-compose
 

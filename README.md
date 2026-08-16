@@ -142,12 +142,146 @@ echo -n "$GOOGLE_CLIENT_SECRET" | gcloud secrets create google-client-secret --d
 
 ## Build & push the proxy image
 
-```bash
-export PROJECT_ID=your-project REGION=asia-southeast1 REPO=mcp
-gcloud artifacts repositories create $REPO --repository-format=docker --location=$REGION 2>/dev/null || true
-docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/oauth-proxy:latest .
-docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/oauth-proxy:latest
+The proxy is fully generic — no MCP-specific config is baked into the
+image (see the [`Dockerfile`](Dockerfile): just `app.py` +
+`requirements.txt`) — so one build serves every MCP server's deployment.
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds and
+publishes it automatically on every push to `main` that touches the
+proxy's source, to **GitHub Container Registry**:
+
 ```
+ghcr.io/<owner>/mcp-oauth-proxy:latest
+ghcr.io/<owner>/mcp-oauth-proxy:<commit-sha>
+```
+
+No Google Cloud setup required for this step — auth is just the repo's
+built-in `GITHUB_TOKEN` against `ghcr.io`. If something outside GitHub
+Actions needs to pull the image (e.g. Cloud Run deploying it), either make
+the package public (repo → Packages → this package → Package settings →
+Change visibility) or generate a PAT with `read:packages` and hand that to
+whatever's pulling it — GHCR doesn't have a Workload-Identity-style
+keyless option like Artifact Registry does.
+
+To build locally instead:
+
+```bash
+docker build -t oauth-proxy:local .
+docker run --rm -p 8080:8080 --env-file .env oauth-proxy:local
+```
+
+## Deploying a new MCP server to Cloud Run
+
+This repo deploys **one MCP server per branch**, never from `main` —
+`main` only carries the proxy source and this shared, reusable deploy
+workflow; each MCP server gets its own `deploy/<name>` branch with its own
+GitHub Environment, so unrelated MCP deployments never trigger or
+misconfigure each other.
+
+[`.github/workflows/deploy-service.yml`](.github/workflows/deploy-service.yml)
+does the actual `gcloud run deploy` — WIF auth, the two-phase bootstrap for
+a brand-new service's `*.run.app` URL, all of it — as a **reusable
+workflow** (`on: workflow_call`), so every deploy branch calls it instead
+of copy-pasting the same ~130 lines of YAML. A new branch's own workflow
+is just a thin caller:
+
+```yaml
+# .github/workflows/deploy.yml on deploy/<name>
+name: deploy <name>
+
+on:
+  push:
+    branches: [deploy/<name>]
+  workflow_dispatch:
+
+jobs:
+  # Only needed if this MCP server has its own credentials to inject
+  # (e.g. a service-account token) -- skip this job if it doesn't.
+  prepare:
+    runs-on: ubuntu-latest
+    environment: <name>
+    outputs:
+      backend_env_vars: ${{ steps.compose.outputs.value }}
+    steps:
+      - id: compose
+        env:
+          SOME_TOKEN: ${{ secrets.SOME_TOKEN }}
+        run: echo "value=SOME_TOKEN=${SOME_TOKEN}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: prepare
+    uses: <owner>/mcp-oauth-proxy/.github/workflows/deploy-service.yml@main
+    with:
+      environment: <name>
+      service: ${{ vars.SERVICE }}
+      project_id: ${{ vars.PROJECT_ID }}
+      region: ${{ vars.REGION }}
+      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+      deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+      allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
+      backend_image: <backend-image>
+      backend_command: <comma,separated,argv>
+      backend_port: "<port>"
+      backend_env_vars: ${{ needs.prepare.outputs.backend_env_vars }}
+    secrets: inherit
+```
+
+The `prepare` → `deploy` split exists only because a reusable workflow's
+`with:` can't reference the `secrets` context directly (GitHub blocks
+smuggling raw secrets into plain inputs) — so a backend credential has to
+be composed into a string by an ordinary job first, then handed to the
+reusable workflow as that job's *output*. `secrets: inherit` separately
+passes through `SIGNING_KEY`/`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` (the
+proxy's own, fixed-name secrets) automatically.
+
+### Per-MCP GitHub Environment
+
+Create a GitHub Environment named after the branch (`<name>`) with:
+
+**Variables:** `SERVICE`, `PROJECT_ID`, `REGION`, `WORKLOAD_IDENTITY_PROVIDER`,
+`DEPLOYER_SERVICE_ACCOUNT`, `ALLOWED_DOMAINS`, plus any of this MCP
+server's own non-secret config.
+
+**Secrets:** `SIGNING_KEY` (`openssl rand -base64 48`), `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, plus any of this MCP server's own credentials.
+
+Add **required reviewers** on the Environment for anything you'd consider
+production — that's the approval gate, no extra tooling needed.
+
+### One-time GCP setup (per project, not per MCP)
+
+Only Workload Identity Federation and a deployer service account are
+needed — **no Artifact Registry repo**, since the image is pulled from
+`ghcr.io`, not GAR:
+
+```bash
+gcloud iam workload-identity-pools create github-pool \
+  --project="$PROJECT_ID" --location=global --display-name="GitHub Actions"
+
+gcloud iam workload-identity-pools providers create-oidc github-provider \
+  --project="$PROJECT_ID" --location=global --workload-identity-pool=github-pool \
+  --display-name="GitHub" --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="assertion.repository=='<owner>/mcp-oauth-proxy'"
+
+gcloud iam service-accounts create gh-deployer --project="$PROJECT_ID"
+
+gcloud iam service-accounts add-iam-policy-binding \
+  "gh-deployer@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --project="$PROJECT_ID" --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-pool/attribute.repository/<owner>/mcp-oauth-proxy"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:gh-deployer@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role=roles/run.admin
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:gh-deployer@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role=roles/iam.serviceAccountUser
+```
+
+If the `ghcr.io` image is private rather than public, Cloud Run also needs
+a way to pull it — either make the package public (see above), or mirror
+it into an Artifact Registry **remote repository** pointing at `ghcr.io`
+and grant `gh-deployer` `roles/artifactregistry.reader` on that.
 
 ## Local testing
 
