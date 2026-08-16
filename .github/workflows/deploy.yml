@@ -81,6 +81,10 @@ jobs:
       # a value repeated within one flag ("cannot be specified multiple
       # times"), so the literal duplicate broke this deploy.
       backend_image: grafana/mcp-grafana:latest
+      # Pinned explicitly (--command) since the image's own baked-in
+      # ENTRYPOINT wasn't reliably preserved by --args alone -- see
+      # deploy-service.yml's backend_entrypoint input description.
+      backend_entrypoint: /app/mcp-grafana
       backend_command: -t,streamable-http,--allowed-hosts,127.0.0.1,--allowed-origins,http://127.0.0.1:8000
       backend_port: "8000"
       backend_env_vars: ${{ needs.prepare.outputs.backend_env_vars }}
