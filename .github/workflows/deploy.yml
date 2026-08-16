@@ -45,18 +45,29 @@ jobs:
           GRAFANA_URL: ${{ vars.GRAFANA_URL }}
           GRAFANA_SERVICE_ACCOUNT_TOKEN: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
         run: |
-          echo "value=GRAFANA_URL=${GRAFANA_URL}##GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_SERVICE_ACCOUNT_TOKEN}" >> "$GITHUB_OUTPUT"
+          # $GITHUB_OUTPUT requires one `key=value` per line -- a trailing
+          # or embedded newline in either value (common if a secret was
+          # pasted/piped in from a file) would silently split this into a
+          # malformed extra line, corrupting or emptying the whole output.
+          # Strip newlines defensively before composing.
+          clean() { printf '%s' "$1" | tr -d '\n'; }
+          GRAFANA_URL_CLEAN=$(clean "$GRAFANA_URL")
+          GRAFANA_TOKEN_CLEAN=$(clean "$GRAFANA_SERVICE_ACCOUNT_TOKEN")
+          echo "value=GRAFANA_URL=${GRAFANA_URL_CLEAN}##GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_TOKEN_CLEAN}" >> "$GITHUB_OUTPUT"
 
       # Diagnostics: GH auto-masks any secret value that appears in logs,
       # so it's safe to print these directly even if non-empty.
       - name: diagnostics -- confirm what this job actually resolved
         run: |
-          echo "ALLOWED_DOMAINS (vars)  = '${{ vars.ALLOWED_DOMAINS }}'"
-          echo "ALLOWED_EMAILS (vars)   = '${{ vars.ALLOWED_EMAILS }}'"
-          echo "GRAFANA_URL (vars)      = '${{ vars.GRAFANA_URL }}'"
-          echo "compose output length  = ${#COMPOSE_VALUE}"
-          echo "compose output value   = '${COMPOSE_VALUE}'"
+          echo "ALLOWED_DOMAINS (vars)     = '${{ vars.ALLOWED_DOMAINS }}'"
+          echo "ALLOWED_EMAILS (vars)      = '${{ vars.ALLOWED_EMAILS }}'"
+          echo "GRAFANA_URL (vars)         = '${{ vars.GRAFANA_URL }}' (length ${#GRAFANA_URL_RAW})"
+          echo "GRAFANA_TOKEN raw length   = ${#GRAFANA_TOKEN_RAW} (0 means unset/empty in the Environment)"
+          echo "compose output length      = ${#COMPOSE_VALUE}"
+          echo "compose output value       = '${COMPOSE_VALUE}'"
         env:
+          GRAFANA_URL_RAW: ${{ vars.GRAFANA_URL }}
+          GRAFANA_TOKEN_RAW: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
           COMPOSE_VALUE: ${{ steps.compose.outputs.value }}
 
   deploy:
