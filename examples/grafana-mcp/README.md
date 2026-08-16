@@ -98,20 +98,22 @@ Trade-offs to accept:
   refreshes immediately, but an already-issued access token remains valid
   until it expires.
 
-## CI/CD: GitHub Actions
+## The oauth-proxy image
 
-This repo deploys each MCP server from its **own branch**, not `main`, via
-a pair of workflows (see [`deploy-template/README.md`](../../deploy-template/README.md)
-for the full setup and why they're split this way):
+`main`'s [`.github/workflows/build.yml`](../../.github/workflows/build.yml)
+builds+publishes the proxy image to GitHub Container Registry on every
+push to `main` — one shared, generic image (no MCP-specific config baked
+in) that any MCP server's deployment can pull:
 
-- `.github/workflows/build.yml` on the `deploy/grafana-mcp` branch builds+
-  pushes the oauth-proxy image on every push to that branch.
-- `.github/workflows/deploy-grafana-mcp.yml` on `main` listens for that
-  build to finish and does the actual `gcloud run deploy`.
+```
+ghcr.io/<owner>/mcp-oauth-proxy:latest
+```
 
-Both read their config from the same `grafana-mcp` GitHub Environment —
-`main` carries no MCP-specific vars/secrets of its own, just this one
-generic listener file.
+Actually deploying it (to Cloud Run or elsewhere) — wiring up this image,
+`grafana/mcp-grafana:latest`, and this MCP server's vars/secrets into a
+running service — is this example's own concern, not `main`'s. See
+[`deploy.sh`](deploy.sh) and [`secrets-setup.sh`](secrets-setup.sh) for
+the manual path.
 
 ## Original docker-compose
 
