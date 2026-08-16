@@ -1,0 +1,55 @@
+# Builds+publishes the oauth-proxy image to GitHub Container Registry
+# (ghcr.io) on every push to main that touches the proxy's source.
+#
+# This is the *only* build of this image, done once here rather than
+# per-MCP-deploy-branch: the proxy is fully generic (no MCP-specific
+# config baked in, see the Dockerfile), so one shared image published from
+# main is all any deploy branch needs to pull. No Google Cloud dependency
+# at all -- auth is just the repo's own built-in GITHUB_TOKEN against
+# ghcr.io, nothing to provision ahead of time.
+#
+# What deploys this image (Cloud Run or otherwise) is a separate concern,
+# out of scope here -- see each deploy/<mcp-name> branch for that.
+
+name: build oauth-proxy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - app.py
+      - requirements.txt
+      - Dockerfile
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build+push oauth-proxy image
+        run: |
+          set -euo pipefail
+          docker build \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${{ github.sha }}" \
+            .
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ github.sha }}"
+
+          echo "Published: ${IMAGE}:${{ github.sha }} (also tagged :latest)"

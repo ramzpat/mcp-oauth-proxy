@@ -142,11 +142,31 @@ echo -n "$GOOGLE_CLIENT_SECRET" | gcloud secrets create google-client-secret --d
 
 ## Build & push the proxy image
 
+The proxy is fully generic — no MCP-specific config is baked into the
+image (see the [`Dockerfile`](Dockerfile): just `app.py` +
+`requirements.txt`) — so one build serves every MCP server's deployment.
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds and
+publishes it automatically on every push to `main` that touches the
+proxy's source, to **GitHub Container Registry**:
+
+```
+ghcr.io/<owner>/mcp-oauth-proxy:latest
+ghcr.io/<owner>/mcp-oauth-proxy:<commit-sha>
+```
+
+No Google Cloud setup required for this step — auth is just the repo's
+built-in `GITHUB_TOKEN` against `ghcr.io`. If something outside GitHub
+Actions needs to pull the image (e.g. Cloud Run deploying it), either make
+the package public (repo → Packages → this package → Package settings →
+Change visibility) or generate a PAT with `read:packages` and hand that to
+whatever's pulling it — GHCR doesn't have a Workload-Identity-style
+keyless option like Artifact Registry does.
+
+To build locally instead:
+
 ```bash
-export PROJECT_ID=your-project REGION=asia-southeast1 REPO=mcp
-gcloud artifacts repositories create $REPO --repository-format=docker --location=$REGION 2>/dev/null || true
-docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/oauth-proxy:latest .
-docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/oauth-proxy:latest
+docker build -t oauth-proxy:local .
+docker run --rm -p 8080:8080 --env-file .env oauth-proxy:local
 ```
 
 ## Local testing
