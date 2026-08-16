@@ -194,14 +194,23 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Only needed if this MCP server has its own credentials to inject
-  # (e.g. a service-account token) -- skip this job if it doesn't.
+  # Runs with `environment: <name>` so it can see this MCP's
+  # Environment-scoped vars/secrets, and republishes everything the
+  # deploy job's `with:` needs as plain job outputs.
   prepare:
     runs-on: ubuntu-latest
     environment: <name>
     outputs:
+      service: ${{ vars.SERVICE }}
+      project_id: ${{ vars.PROJECT_ID }}
+      region: ${{ vars.REGION }}
+      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
+      deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+      allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
       backend_env_vars: ${{ steps.compose.outputs.value }}
     steps:
+      # Only this step is specific to the backend -- compose whatever
+      # credentials/config it needs into one "##"-delimited string.
       - id: compose
         env:
           SOME_TOKEN: ${{ secrets.SOME_TOKEN }}
@@ -209,23 +218,18 @@ jobs:
 
   deploy:
     needs: prepare
-    # `with:` below is evaluated in *this* job's context, before the call
-    # happens -- without `environment:` set here too, `vars.*` only sees
-    # repo/org-level variables, not the ones configured under this
-    # Environment, and every input below silently resolves empty.
-    environment: <name>
     permissions:
       contents: read
       id-token: write # deploy-service.yml needs this granted here to use it itself
     uses: <owner>/mcp-oauth-proxy/.github/workflows/deploy-service.yml@main
     with:
       environment: <name>
-      service: ${{ vars.SERVICE }}
-      project_id: ${{ vars.PROJECT_ID }}
-      region: ${{ vars.REGION }}
-      workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
-      deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
-      allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
+      service: ${{ needs.prepare.outputs.service }}
+      project_id: ${{ needs.prepare.outputs.project_id }}
+      region: ${{ needs.prepare.outputs.region }}
+      workload_identity_provider: ${{ needs.prepare.outputs.workload_identity_provider }}
+      deployer_service_account: ${{ needs.prepare.outputs.deployer_service_account }}
+      allowed_domains: ${{ needs.prepare.outputs.allowed_domains }}
       backend_image: <backend-image>
       backend_command: <comma,separated,argv>
       backend_port: "<port>"
@@ -233,13 +237,17 @@ jobs:
     secrets: inherit
 ```
 
-The `prepare` → `deploy` split exists only because a reusable workflow's
-`with:` can't reference the `secrets` context directly (GitHub blocks
-smuggling raw secrets into plain inputs) — so a backend credential has to
-be composed into a string by an ordinary job first, then handed to the
-reusable workflow as that job's *output*. `secrets: inherit` separately
-passes through `SIGNING_KEY`/`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` (the
-proxy's own, fixed-name secrets) automatically.
+Two non-obvious reasons `deploy` reads everything from `needs.prepare.outputs.*`
+instead of `vars.*`/`secrets.*` directly: a job that calls a reusable
+workflow (`uses:`) doesn't support an `environment:` key at all — GitHub
+rejects the whole job as malformed if you add one, which also means its
+`vars` context only ever sees repo/org-level variables, never this
+Environment's. And separately, `with:` can't reference `secrets` at all,
+regardless. Composing everything in `prepare` (which *can* have
+`environment: <name>`) and passing it forward as outputs sidesteps both.
+`secrets: inherit` separately passes through
+`SIGNING_KEY`/`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` (the proxy's own,
+fixed-name secrets) automatically.
 
 ### Per-MCP GitHub Environment
 
