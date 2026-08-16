@@ -11,6 +11,15 @@
 # can't reference `secrets` directly regardless. Composing everything in
 # `prepare` and passing it via `needs.prepare.outputs.*` sidesteps both.
 #
+# backend_env_vars is composed *directly* in the `outputs:` mapping below
+# (an ordinary job's own `${{ }}` expressions there have full vars/secrets
+# access -- only a job that itself calls a reusable workflow is
+# restricted). An earlier version routed this through a shell step's
+# $GITHUB_OUTPUT instead; that round-trip reproducibly came through empty
+# at deploy-service.yml's end despite the step itself printing the
+# correct composed value moments earlier in the same run -- direct
+# expression interpolation sidesteps whatever that was.
+#
 # No build step here anymore: the oauth-proxy image is generic and built
 # once on main (.github/workflows/build.yml there), published to
 # ghcr.io/<repo>. This workflow only ever deploys.
@@ -34,27 +43,12 @@ jobs:
       deployer_service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
       allowed_domains: ${{ vars.ALLOWED_DOMAINS }}
       allowed_emails: ${{ vars.ALLOWED_EMAILS }}
-      backend_env_vars: ${{ steps.compose.outputs.value }}
+      backend_env_vars: GRAFANA_URL=${{ vars.GRAFANA_URL }}##GRAFANA_SERVICE_ACCOUNT_TOKEN=${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
     # NOTE: the outputs: block above IS what the `deploy` job's `with:`
-    # reads via needs.prepare.outputs.* -- these `vars.*` expressions are
-    # evaluated by GitHub directly against this job's `environment:`, no
-    # step/shell involved.
+    # reads via needs.prepare.outputs.* -- these expressions are evaluated
+    # by GitHub directly against this job's `environment:`, no step/shell
+    # involved.
     steps:
-      - id: compose
-        env:
-          GRAFANA_URL: ${{ vars.GRAFANA_URL }}
-          GRAFANA_SERVICE_ACCOUNT_TOKEN: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
-        run: |
-          # $GITHUB_OUTPUT requires one `key=value` per line -- a trailing
-          # or embedded newline in either value (common if a secret was
-          # pasted/piped in from a file) would silently split this into a
-          # malformed extra line, corrupting or emptying the whole output.
-          # Strip newlines defensively before composing.
-          clean() { printf '%s' "$1" | tr -d '\n'; }
-          GRAFANA_URL_CLEAN=$(clean "$GRAFANA_URL")
-          GRAFANA_TOKEN_CLEAN=$(clean "$GRAFANA_SERVICE_ACCOUNT_TOKEN")
-          echo "value=GRAFANA_URL=${GRAFANA_URL_CLEAN}##GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_TOKEN_CLEAN}" >> "$GITHUB_OUTPUT"
-
       # Diagnostics: GH auto-masks any secret value that appears in logs,
       # so it's safe to print these directly even if non-empty.
       - name: diagnostics -- confirm what this job actually resolved
@@ -63,12 +57,9 @@ jobs:
           echo "ALLOWED_EMAILS (vars)      = '${{ vars.ALLOWED_EMAILS }}'"
           echo "GRAFANA_URL (vars)         = '${{ vars.GRAFANA_URL }}' (length ${#GRAFANA_URL_RAW})"
           echo "GRAFANA_TOKEN raw length   = ${#GRAFANA_TOKEN_RAW} (0 means unset/empty in the Environment)"
-          echo "compose output length      = ${#COMPOSE_VALUE}"
-          echo "compose output value       = '${COMPOSE_VALUE}'"
         env:
           GRAFANA_URL_RAW: ${{ vars.GRAFANA_URL }}
           GRAFANA_TOKEN_RAW: ${{ secrets.GRAFANA_SERVICE_ACCOUNT_TOKEN }}
-          COMPOSE_VALUE: ${{ steps.compose.outputs.value }}
 
   deploy:
     needs: prepare
