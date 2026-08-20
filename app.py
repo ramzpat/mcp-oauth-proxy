@@ -112,9 +112,26 @@ def new_code_verifier() -> str:
     return b64url(os.urandom(40))
 
 
+# RFC 9728 §3: the metadata URL for a resource is built by inserting
+# "/.well-known/oauth-protected-resource" BEFORE the resource's path -- so a
+# resource at https://host/mcp is described at
+# https://host/.well-known/oauth-protected-resource/mcp, NOT at the bare
+# well-known path. Clients derive it that way and fetch it directly.
+#
+# Advertising the bare path instead was observed to break Claude: it fetched
+# the suffixed URL, hit this app's catch-all proxy route (401), fell back to
+# the bare URL, completed the whole OAuth flow successfully -- and then never
+# attached the token to /mcp, looping /token -> unauthenticated /mcp -> /token
+# indefinitely. Serve both, and advertise the canonical one.
+RESOURCE_PATH = urllib.parse.urlparse(RESOURCE).path.rstrip("/")
+
+
+def resource_metadata_url() -> str:
+    return f"{PUBLIC_URL}/.well-known/oauth-protected-resource{RESOURCE_PATH}"
+
+
 def www_authenticate_header() -> str:
-    resource_metadata = f"{PUBLIC_URL}/.well-known/oauth-protected-resource"
-    return f'Bearer resource_metadata="{resource_metadata}"'
+    return f'Bearer resource_metadata="{resource_metadata_url()}"'
 
 
 # --------------------------------------------------------------------------
@@ -446,8 +463,13 @@ async def healthz(request: Request):
 
 app = Starlette(routes=[
     Route("/healthz", healthz),
-    Route("/.well-known/oauth-protected-resource", protected_resource_metadata),
-    Route("/.well-known/oauth-authorization-server", authorization_server_metadata),
+    # `{path:path}` so both the bare well-known path and the RFC 9728
+    # path-suffixed form (".../oauth-protected-resource/mcp") resolve here.
+    # Without the suffixed form these fell through to the catch-all proxy
+    # route below and answered 401 to a discovery request. Order matters:
+    # the catch-all must stay last.
+    Route("/.well-known/oauth-protected-resource{suffix:path}", protected_resource_metadata),
+    Route("/.well-known/oauth-authorization-server{suffix:path}", authorization_server_metadata),
     Route("/register", register, methods=["POST"]),
     Route("/authorize", authorize),
     Route("/oauth2/callback", google_callback),
