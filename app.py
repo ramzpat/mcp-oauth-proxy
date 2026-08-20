@@ -142,6 +142,19 @@ async def protected_resource_metadata(request: Request):
     return JSONResponse({
         "resource": RESOURCE,
         "authorization_servers": [PUBLIC_URL],
+        # bearer_methods_supported is optional in RFC 9728 but omitting it is
+        # NOT the same as leaving it to a sensible default. RFC 9728 §2 is
+        # explicit: "if this entry is omitted, no default bearer methods
+        # supported are implied". So a client that reads this document learns
+        # which AS to authenticate against, obtains a token -- and is never
+        # told it may present that token in the Authorization header.
+        #
+        # Claude did exactly that: full flow to a 200 from /token, then POST
+        # /mcp with no Authorization header at all, treating the resulting 401
+        # as an expired token and refreshing, forever. "header" is RFC 6750
+        # §2.1, which is what mcp_proxy actually reads.
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": ["tools:read", "tools:write"],
     })
 
 
