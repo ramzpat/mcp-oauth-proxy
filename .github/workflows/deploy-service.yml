@@ -11,18 +11,41 @@
 #  - `environment: ${{ inputs.environment }}` scopes the job to the
 #    caller's GitHub Environment, so its required-reviewer / deployment-
 #    branch protection rules (if any) apply here too.
-#  - Backend-specific secrets (e.g. a Grafana service-account token) can't
-#    be declared here by name -- every MCP server needs different ones.
-#    Callers compose a single `backend_env_vars` string themselves (in
-#    their own job, with their own secrets) and pass the *result* as a
-#    plain input -- GitHub Actions masks the underlying secret values in
-#    logs wherever they appear, so this doesn't leak them, it just avoids
-#    this workflow needing to know their names in advance.
+#  - backend_env_vars (a plain input) is for NON-secret extra backend
+#    config only, e.g. GRAFANA_URL. A single generic BACKEND_SECRET slot
+#    covers one backend-specific credential (paired with the
+#    backend_secret_env_name input, which says what env var name to
+#    expose it as on the backend container) -- callers map their actual
+#    secret onto it explicitly: `secrets: { BACKEND_SECRET: ${{
+#    secrets.THEIR_SECRET_NAME }}, ... }`. This has to be a real named
+#    `secrets:` entry, not something composed into a job output: GitHub
+#    silently blanks any job output whose value contains a secret when
+#    it's read cross-job (via needs.<job>.outputs.<name>) -- a real,
+#    documented leak-prevention guardrail, confirmed the hard way here
+#    (an earlier design routed a Grafana service-account token through a
+#    prepare job's output, which always arrived empty at this workflow no
+#    matter how it was composed, while every secret-free output worked
+#    fine).
 #  - PUBLIC_URL/RESOURCE aren't known until Cloud Run assigns the service
 #    its *.run.app URL. The very first deploy of a new service bootstraps
 #    in two phases (deploy with a placeholder URL to provision the
 #    service, then redeploy with the real one); every deploy after that
 #    reuses the already-assigned URL in a single shot.
+#  - oauth-proxy --depends-on=backend requires the backend container to
+#    have an explicit startup probe (Cloud Run rejects the deploy
+#    otherwise: "Dependent container 'backend' must have startup probe
+#    specified") -- a plain TCP check on the backend's own port is enough
+#    since we're only using it to sequence container startup, not for
+#    ongoing health monitoring.
+#  - Backend container gets BOTH --command=backend_entrypoint (the real
+#    binary path) and --args=backend_command (CLI flags), not just the
+#    latter. --command overrides ENTRYPOINT and --args overrides CMD in
+#    principle, so args-only *should* leave a baked-in ENTRYPOINT intact
+#    -- but Cloud Run's multi-container --args has been observed to drop
+#    it anyway, launching the args list with no binary at position 0
+#    ("failed to resolve binary path: error finding executable "-t" in
+#    PATH"). Pinning --command explicitly sidesteps that regardless of
+#    which side the bug is actually on.
 
 name: deploy Cloud Run service (reusable)
 
@@ -51,9 +74,21 @@ on:
         required: true
         type: string
       allowed_domains:
-        description: Comma-separated Workspace domains allowed to log in
-        required: true
+        description: >-
+          Comma-separated Workspace domains allowed to log in. At least one
+          of allowed_domains/allowed_emails must be non-empty -- app.py
+          refuses to start otherwise.
+        required: false
         type: string
+        default: ""
+      allowed_emails:
+        description: >-
+          Comma-separated exact emails allowed to log in. At least one of
+          allowed_domains/allowed_emails must be non-empty -- app.py
+          refuses to start otherwise.
+        required: false
+        type: string
+        default: ""
       proxy_image_tag:
         description: Tag of ghcr.io/<repo> to deploy
         required: false
@@ -63,8 +98,33 @@ on:
         description: Unmodified MCP server image, e.g. grafana/mcp-grafana:latest
         required: true
         type: string
+      backend_entrypoint:
+        description: >-
+          Absolute path to the backend image's own binary (becomes
+          gcloud's --command). In principle --args alone (leaving the
+          image's baked-in ENTRYPOINT untouched) should be enough, but
+          Cloud Run's multi-container --args has been observed to drop
+          the image's ENTRYPOINT entirely, launching the raw args list
+          as if the first flag were the binary itself ("failed to
+          resolve binary path: error finding executable "-t" in PATH").
+          Pinning --command explicitly to the real binary sidesteps
+          that regardless of which side the bug is actually on. Find it
+          with `docker inspect <image> --format='{{.Config.Entrypoint}}'`.
+        required: true
+        type: string
       backend_command:
-        description: Comma-separated argv for the backend container
+        description: >-
+          Comma-separated CLI args appended after backend_entrypoint
+          (becomes gcloud's --args). Overrides the image's own default
+          CMD/args, but NOT its ENTRYPOINT's own baked-in flags (if any)
+          -- repeat those here too if they'd otherwise be lost. gcloud
+          rejects a literal value repeated within the list -- e.g. the
+          same "127.0.0.1" as both one flag's value and another flag's
+          value fails with "cannot be specified multiple times". Use a
+          textually distinct but equivalent value if that happens (e.g. a
+          full origin "http://127.0.0.1:<port>" instead of a bare host,
+          for a flag that's semantically checking an Origin header rather
+          than a Host header).
         required: true
         type: string
       backend_port:
@@ -73,8 +133,19 @@ on:
         type: string
       backend_env_vars:
         description: >-
-          Extra backend env vars, "##"-delimited KEY=VALUE pairs (e.g.
-          composed by the caller from its own vars/secrets). Optional.
+          Extra NON-secret backend env vars, "##"-delimited KEY=VALUE
+          pairs (e.g. composed by the caller from its own vars). For a
+          secret, use backend_secret_env_name + the BACKEND_SECRET secret
+          instead -- see the design note above for why.
+        required: false
+        type: string
+        default: ""
+      backend_secret_env_name:
+        description: >-
+          Env var name to expose the BACKEND_SECRET secret as on the
+          backend container, e.g. "GRAFANA_SERVICE_ACCOUNT_TOKEN". Leave
+          unset (with BACKEND_SECRET also unset) if the backend needs no
+          such credential.
         required: false
         type: string
         default: ""
@@ -85,6 +156,8 @@ on:
         required: true
       GOOGLE_CLIENT_SECRET:
         required: true
+      BACKEND_SECRET:
+        required: false
 
 permissions:
   contents: read
@@ -99,15 +172,64 @@ jobs:
       REGION: ${{ inputs.region }}
       SERVICE: ${{ inputs.service }}
       ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
+      ALLOWED_EMAILS: ${{ inputs.allowed_emails }}
       PROXY_IMAGE: ghcr.io/${{ github.repository }}:${{ inputs.proxy_image_tag }}
       BACKEND_IMAGE: ${{ inputs.backend_image }}
+      BACKEND_ENTRYPOINT: ${{ inputs.backend_entrypoint }}
       BACKEND_COMMAND: ${{ inputs.backend_command }}
       BACKEND_PORT: ${{ inputs.backend_port }}
       BACKEND_ENV_VARS: ${{ inputs.backend_env_vars }}
+      BACKEND_SECRET_ENV_NAME: ${{ inputs.backend_secret_env_name }}
+      BACKEND_SECRET: ${{ secrets.BACKEND_SECRET }}
       SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
     steps:
+      - name: diagnostics -- confirm which commit of this workflow actually ran
+        run: |
+          echo "deploy-service.yml resolved from: ${{ github.workflow_ref }}"
+          echo "backend_entrypoint input as received: ${{ inputs.backend_entrypoint }}"
+          echo "backend_command input as received: ${{ inputs.backend_command }}"
+          echo "allowed_domains input as received: '${{ inputs.allowed_domains }}'"
+          echo "allowed_emails input as received:  '${{ inputs.allowed_emails }}'"
+          echo "backend_env_vars input length:     ${#BACKEND_ENV_VARS_CHECK}"
+          echo "backend_secret_env_name received:  '${{ inputs.backend_secret_env_name }}'"
+          echo "BACKEND_SECRET raw length:          ${#BACKEND_SECRET_CHECK}"
+        env:
+          BACKEND_ENV_VARS_CHECK: ${{ inputs.backend_env_vars }}
+          BACKEND_SECRET_CHECK: ${{ secrets.BACKEND_SECRET }}
+
+      - name: fail fast if neither allowlist is set
+        if: inputs.allowed_domains == '' && inputs.allowed_emails == ''
+        run: |
+          echo "::error::Neither allowed_domains nor allowed_emails is set -- app.py refuses to boot without at least one, so this would fail at container startup instead. Set one in the caller workflow / GitHub Environment."
+          exit 1
+
+      - name: resolve proxy image to a digest
+        id: resolve_proxy_image
+        run: |
+          set -euo pipefail
+          # Cloud Run pulls oauth-proxy through Google's Artifact Registry
+          # pull-through cache for ghcr.io, which caches a mutable tag's
+          # tag->digest mapping and doesn't reliably re-check ghcr.io for
+          # a newer image on every deploy -- confirmed the hard way: two
+          # consecutive redeploys both served the same stale digest well
+          # after a newer :latest had been published. Resolving the
+          # digest here (talking to ghcr.io directly, not through GCP's
+          # cache) and deploying pinned to that digest sidesteps it
+          # entirely -- an unseen digest is always fetched fresh.
+          #
+          # No docker/login-action here: this package is public (Cloud
+          # Run itself has never had any ghcr.io credentials configured
+          # anywhere in this deploy, and pulls it fine), and adding a
+          # login would need a `packages: read` grant that this repo's
+          # default GITHUB_TOKEN permissions cap at `none` -- a repo/org
+          # setting no workflow-level `permissions:` block can override.
+          # An anonymous inspect works for a public image regardless.
+          DIGEST=$(docker buildx imagetools inspect "$PROXY_IMAGE" | awk '/^Digest:/{print $2; exit}')
+          echo "resolved digest: $DIGEST"
+          echo "image=${PROXY_IMAGE%%:*}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - id: auth
         uses: google-github-actions/auth@v2
         with:
@@ -117,8 +239,10 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: deploy to Cloud Run
+        env:
+          PROXY_IMAGE: ${{ steps.resolve_proxy_image.outputs.image }}
         run: |
-          set -euo pipefail
+          set -euo pipefail -x # -x: echo every gcloud invocation verbatim into the log
 
           # `^##^` switches gcloud's list delimiter from "," to "##" so
           # secret/command values containing commas can't break --set-env-vars.
@@ -126,6 +250,7 @@ jobs:
             local public_url="$1"
             local backend_extra=""
             [ -n "$BACKEND_ENV_VARS" ] && backend_extra="##${BACKEND_ENV_VARS}"
+            [ -n "$BACKEND_SECRET_ENV_NAME" ] && backend_extra="${backend_extra}##${BACKEND_SECRET_ENV_NAME}=${BACKEND_SECRET}"
 
             gcloud run deploy "$SERVICE" \
               --project="$PROJECT_ID" \
@@ -133,16 +258,18 @@ jobs:
               --allow-unauthenticated \
               --min-instances=0 --max-instances=3 \
               --no-cpu-throttling \
+              --cpu-boost \
               --container=backend \
                 --image="$BACKEND_IMAGE" \
-                --command="$BACKEND_COMMAND" \
+                --command="$BACKEND_ENTRYPOINT" \
+                --args="$BACKEND_COMMAND" \
                 --set-env-vars="^##^PORT=${BACKEND_PORT}##HOST=127.0.0.1${backend_extra}" \
+                --startup-probe="tcpSocket.port=${BACKEND_PORT},timeoutSeconds=3,periodSeconds=3,failureThreshold=10" \
               --container=oauth-proxy \
                 --image="$PROXY_IMAGE" \
                 --port=8080 \
-                --startup-cpu-boost \
                 --depends-on=backend \
-                --set-env-vars="^##^PUBLIC_URL=${public_url}##UPSTREAM_URL=http://127.0.0.1:${BACKEND_PORT}##RESOURCE=${public_url}/mcp##ALLOWED_DOMAINS=${ALLOWED_DOMAINS}##SIGNING_KEY=${SIGNING_KEY}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
+                --set-env-vars="^##^PUBLIC_URL=${public_url}##UPSTREAM_URL=http://127.0.0.1:${BACKEND_PORT}##RESOURCE=${public_url}/mcp##ALLOWED_DOMAINS=${ALLOWED_DOMAINS}##ALLOWED_EMAILS=${ALLOWED_EMAILS}##SIGNING_KEY=${SIGNING_KEY}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
           }
 
           # Public URL is unknown until Cloud Run provisions the service

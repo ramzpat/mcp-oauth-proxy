@@ -30,6 +30,7 @@ Run:
 
 import base64
 import hashlib
+import logging
 import os
 import time
 import urllib.parse
@@ -41,6 +42,9 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
+
+logger = logging.getLogger("oauth-proxy")
+logging.basicConfig(level=logging.INFO)
 
 # --------------------------------------------------------------------------
 # Config (all via env vars / Secret Manager — nothing hardcoded)
@@ -81,7 +85,16 @@ def sign(payload: dict) -> str:
 
 
 def verify(token: str, expected_typ: Optional[str] = None) -> dict:
-    payload = pyjwt.decode(token, SIGNING_KEY, algorithms=[JWT_ALG])
+    # verify_aud=False: PyJWT refuses to decode a token carrying an "aud"
+    # claim unless you pass audience=<expected value> to decode() -- it
+    # raises InvalidAudienceError otherwise, even before returning the
+    # payload for inspection. Access/refresh tokens always carry "aud"
+    # (see _issue_tokens), and mcp_proxy does its own explicit
+    # claims.get("aud") != RESOURCE check right after this returns, so
+    # PyJWT's own check is both redundant and, without an audience= this
+    # generic across token types, was rejecting every access token
+    # outright.
+    payload = pyjwt.decode(token, SIGNING_KEY, algorithms=[JWT_ALG], options={"verify_aud": False})
     if expected_typ and payload.get("typ") != expected_typ:
         raise pyjwt.InvalidTokenError(f"expected typ={expected_typ}")
     return payload
@@ -99,9 +112,26 @@ def new_code_verifier() -> str:
     return b64url(os.urandom(40))
 
 
+# RFC 9728 §3: the metadata URL for a resource is built by inserting
+# "/.well-known/oauth-protected-resource" BEFORE the resource's path -- so a
+# resource at https://host/mcp is described at
+# https://host/.well-known/oauth-protected-resource/mcp, NOT at the bare
+# well-known path. Clients derive it that way and fetch it directly.
+#
+# Advertising the bare path instead was observed to break Claude: it fetched
+# the suffixed URL, hit this app's catch-all proxy route (401), fell back to
+# the bare URL, completed the whole OAuth flow successfully -- and then never
+# attached the token to /mcp, looping /token -> unauthenticated /mcp -> /token
+# indefinitely. Serve both, and advertise the canonical one.
+RESOURCE_PATH = urllib.parse.urlparse(RESOURCE).path.rstrip("/")
+
+
+def resource_metadata_url() -> str:
+    return f"{PUBLIC_URL}/.well-known/oauth-protected-resource{RESOURCE_PATH}"
+
+
 def www_authenticate_header() -> str:
-    resource_metadata = f"{PUBLIC_URL}/.well-known/oauth-protected-resource"
-    return f'Bearer resource_metadata="{resource_metadata}"'
+    return f'Bearer resource_metadata="{resource_metadata_url()}"'
 
 
 # --------------------------------------------------------------------------
@@ -374,17 +404,25 @@ HOP_BY_HOP = {
 async def mcp_proxy(request: Request):
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
+        logger.warning(
+            "mcp_proxy 401: no Bearer auth header (header present: %s, value prefix: %r)",
+            "authorization" in {k.lower() for k in request.headers.keys()},
+            auth_header[:16],
+        )
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header()})
 
     raw_token = auth_header[len("Bearer "):]
     try:
         claims = verify(raw_token, expected_typ="access")
     except pyjwt.ExpiredSignatureError:
+        logger.warning("mcp_proxy 401: token expired (token length %d)", len(raw_token))
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header() + ', error="invalid_token"'})
-    except pyjwt.InvalidTokenError:
+    except pyjwt.InvalidTokenError as e:
+        logger.warning("mcp_proxy 401: invalid token (%s: %s, token length %d)", type(e).__name__, e, len(raw_token))
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header() + ', error="invalid_token"'})
 
     if claims.get("aud") != RESOURCE:
+        logger.warning("mcp_proxy 401: aud mismatch (token aud=%r, expected RESOURCE=%r)", claims.get("aud"), RESOURCE)
         return Response(status_code=401, headers={"WWW-Authenticate": www_authenticate_header() + ', error="invalid_token"'})
 
     # Strip the inbound Authorization header and ANY client-forged
@@ -425,8 +463,13 @@ async def healthz(request: Request):
 
 app = Starlette(routes=[
     Route("/healthz", healthz),
-    Route("/.well-known/oauth-protected-resource", protected_resource_metadata),
-    Route("/.well-known/oauth-authorization-server", authorization_server_metadata),
+    # `{path:path}` so both the bare well-known path and the RFC 9728
+    # path-suffixed form (".../oauth-protected-resource/mcp") resolve here.
+    # Without the suffixed form these fell through to the catch-all proxy
+    # route below and answered 401 to a discovery request. Order matters:
+    # the catch-all must stay last.
+    Route("/.well-known/oauth-protected-resource{suffix:path}", protected_resource_metadata),
+    Route("/.well-known/oauth-authorization-server{suffix:path}", authorization_server_metadata),
     Route("/register", register, methods=["POST"]),
     Route("/authorize", authorize),
     Route("/oauth2/callback", google_callback),
